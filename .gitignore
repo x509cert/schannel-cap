@@ -1,0 +1,12 @@
+# Build artifacts
+*.exe
+*.obj
+*.pdb
+*.ilk
+
+# Capture / runtime artifacts
+*.etl
+*.pcapng
+conns.txt
+tls.etl
+tls.pcapng
