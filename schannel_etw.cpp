@@ -1,5 +1,5 @@
 /*
- * schannel_etw.c  --  TLS connection-map writer + ETW listener (no injection)
+ * schannel_etw.cpp  --  TLS connection-map writer + ETW listener (no injection)
  *
  * Runs quietly and keeps a PID map current for the offline group decode:
  *   - Continuously snapshots the TCP table (GetExtendedTcpTable) and writes
@@ -17,7 +17,8 @@
  *
  * BUILD (any arch):
  *   cl /nologo /O2 /MT /W4 /GS /guard:cf /Qspectre /sdl /analyze ^
- *      schannel_etw.c /link /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA ^
+ *      /std:c++20 /permissive- /EHsc schannel_etw.cpp ^
+ *      /link /DYNAMICBASE /NXCOMPAT ^
  *      /guard:cf tdh.lib advapi32.lib iphlpapi.lib ws2_32.lib
  */
 
@@ -166,7 +167,7 @@ static void poll_tcp_table(void)
     /* IPv4 */
     if (GetExtendedTcpTable(NULL, &sz, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0)
             == ERROR_INSUFFICIENT_BUFFER &&
-        sz >= FIELD_OFFSET(MIB_TCPTABLE_OWNER_PID, table) &&
+        sz >= (DWORD)FIELD_OFFSET(MIB_TCPTABLE_OWNER_PID, table) &&
         sz <= MAX_TCP_TABLE_ALLOCATION) {
         PMIB_TCPTABLE_OWNER_PID t;
         capacity = sz;
@@ -192,7 +193,7 @@ static void poll_tcp_table(void)
     sz = 0;
     if (GetExtendedTcpTable(NULL, &sz, FALSE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0)
             == ERROR_INSUFFICIENT_BUFFER &&
-        sz >= FIELD_OFFSET(MIB_TCP6TABLE_OWNER_PID, table) &&
+        sz >= (DWORD)FIELD_OFFSET(MIB_TCP6TABLE_OWNER_PID, table) &&
         sz <= MAX_TCP_TABLE_ALLOCATION) {
         PMIB_TCP6TABLE_OWNER_PID t;
         capacity = sz;
@@ -297,10 +298,10 @@ static int decode_props(_In_ PEVENT_RECORD ev,
         if (p->nonStructType.MapNameOffset) {
             LPCWSTR mn = info_string(info, infoSize, p->nonStructType.MapNameOffset);
             if (!mn) break;
-            if (TdhGetEventMapInformation(ev, mn, map, &mapSz) == ERROR_INSUFFICIENT_BUFFER) {
+            if (TdhGetEventMapInformation(ev, (PWSTR)mn, map, &mapSz) == ERROR_INSUFFICIENT_BUFFER) {
                 if (!mapSz || mapSz > MAX_TDH_ALLOCATION) break;
                 map = (PEVENT_MAP_INFO)calloc(1, mapSz);
-                if (map && TdhGetEventMapInformation(ev, mn, map, &mapSz) != ERROR_SUCCESS) { free(map); map = NULL; }
+                if (map && TdhGetEventMapInformation(ev, (PWSTR)mn, map, &mapSz) != ERROR_SUCCESS) { free(map); map = NULL; }
             }
         }
         if (!prop_length(ev, info, infoSize, i, &plen)) { free(map); break; }
@@ -343,8 +344,8 @@ static void WINAPI on_event(_In_ PEVENT_RECORD ev)
 
     if (!ev || !g_verbose) return;
     if (g_filterPid && ev->EventHeader.ProcessId != g_filterPid) return;
-    isSchannel = IsEqualGUID(&ev->EventHeader.ProviderId, &SchannelGuid);
-    isTcpip    = IsEqualGUID(&ev->EventHeader.ProviderId, &TcpipGuid);
+    isSchannel = IsEqualGUID(ev->EventHeader.ProviderId, SchannelGuid);
+    isTcpip    = IsEqualGUID(ev->EventHeader.ProviderId, TcpipGuid);
 
     st = TdhGetEventInformation(ev, 0, NULL, info, &sz);
     if (st == ERROR_INSUFFICIENT_BUFFER &&
@@ -419,7 +420,8 @@ static _Ret_maybenull_ FILE *open_map_file(void)
     if (file == INVALID_HANDLE_VALUE) return NULL;
     descriptor = _open_osfhandle((intptr_t)file, _O_TEXT);
     if (descriptor == -1) { (void)CloseHandle(file); return NULL; }
-    if (_fdopen_s(&stream, descriptor, "w") != 0) {
+    stream = _fdopen(descriptor, "w");
+    if (!stream) {
         (void)_close(descriptor);
         return NULL;
     }

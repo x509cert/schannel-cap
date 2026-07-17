@@ -48,7 +48,7 @@ captured on this machine class — drive the handshake from another host (see
 
 | File | What it is |
 |------|------------|
-| `schannel_etw.c` | ETW listener. Continuously snapshots the TCP table and writes `conns.txt` (`localIP:port remoteIP:port PID`) for the PID join. `-v` dumps raw Schannel/TCPIP events (self-describing via TDH). |
+| `schannel_etw.cpp` | C++ ETW listener. Continuously snapshots the TCP table and writes `conns.txt` (`localIP:port remoteIP:port PID`) for the PID join. `-v` dumps raw Schannel/TCPIP events (self-describing via TDH). |
 | `tls_group.c` | Reads a pcapng capture, pulls the negotiated cipher + group out of each ServerHello, and attaches the owning PID from `conns.txt`. |
 | `build.cmd` | Builds `schannel_etw.exe` and `tls_group.exe`. |
 | `start-sch.ps1` | Starts pktmon capture + the ETW listener. Self-elevating. |
