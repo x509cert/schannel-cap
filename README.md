@@ -49,7 +49,7 @@ captured on this machine class — drive the handshake from another host (see
 | File | What it is |
 |------|------------|
 | `schannel_etw.cpp` | C++ ETW listener. Continuously snapshots the TCP table and writes `conns.txt` (`localIP:port remoteIP:port PID`) for the PID join. `-v` dumps raw Schannel/TCPIP events (self-describing via TDH). |
-| `tls_group.c` | Reads a pcapng capture, pulls the negotiated cipher + group out of each ServerHello, and attaches the owning PID from `conns.txt`. |
+| `tls_group.cpp` | C++ pcapng parser that pulls the negotiated cipher + group out of each ServerHello and attaches the owning PID from `conns.txt`. |
 | `build.cmd` | Builds `schannel_etw.exe` and `tls_group.exe`. |
 | `start-sch.ps1` | Starts pktmon capture + the ETW listener. Self-elevating. |
 | `stop-sch.ps1` | Stops capture, converts ETL→pcapng, and prints the correlated result. Self-elevating. |
@@ -205,7 +205,7 @@ always shown, so unknown groups are still visible — tell the author to add it)
 | `0x001D` | `x25519` |
 | `0x001E` | `x448` |
 
-To add a new group, extend `group_name()` in `tls_group.c`.
+To add a new group, extend `group_name()` in `tls_group.cpp`.
 
 ---
 

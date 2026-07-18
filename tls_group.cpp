@@ -1,5 +1,5 @@
 /*
- * tls_group.c  --  extract the NEGOTIATED TLS group + cipher from ServerHello
+ * tls_group.cpp  --  extract the NEGOTIATED TLS group + cipher from ServerHello
  *
  * Reads a pcapng capture (pktmon / etl2pcapng / Wireshark native) and, for each
  * TLS ServerHello, prints:
@@ -20,7 +20,9 @@
  * that fits in one segment (true in practice -- ServerHello is small; only the
  * ML-KEM *ClientHello* is large). No TCP reassembly.
  *
- * BUILD:  cl /nologo /O2 /MT /W3 /D_CRT_SECURE_NO_WARNINGS tls_group.c
+ * BUILD:  cl /nologo /O2 /MT /W4 /GS /guard:cf /Qspectre /sdl ^
+ *         /std:c++20 /permissive- /EHsc /D_CRT_SECURE_NO_WARNINGS ^
+ *         tls_group.cpp /link /DYNAMICBASE /NXCOMPAT /guard:cf
  */
 
 #define WIN32_LEAN_AND_MEAN
