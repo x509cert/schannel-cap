@@ -3,7 +3,7 @@
  *
  * Runs quietly and keeps a PID map current for the offline group decode:
  *   - Continuously snapshots the TCP table (GetExtendedTcpTable) and writes
- *     "localIP:port remoteIP:port PID" to conns.txt next to this exe.
+ *     "localIP:port remoteIP:port PID" to connections.txt next to this exe.
  *     tls_group.exe joins ServerHello 4-tuples against it to attach the owning
  *     PID -- exact, loopback-safe, no ETW field-name guessing.
  *   - Opens the Schannel + TCPIP ETW session so -v can dump raw events for
@@ -13,7 +13,7 @@
  *  -v            : dump every property of every event (TDH self-describing)
  *  <pid> / -p N  : with -v, restrict the dump to one process
  *
- * conns.txt is (re)created next to the exe. Run ELEVATED. Ctrl+C stops.
+ * connections.txt is (re)created next to the exe. Run ELEVATED. Ctrl+C stops.
  *
  * BUILD (any arch):
  *   cl /nologo /O2 /MT /W4 /GS /guard:cf /Qspectre /sdl /analyze ^
@@ -64,7 +64,7 @@ static DWORD                   g_filterPid = 0;
 static volatile LONG           g_running = 1;
 static volatile LONG           g_sessionStarted = 0;
 
-/* ---- connection map (conns.txt) writer ---------------------------------- */
+/* ---- connection map (connections.txt) writer ---------------------------- */
 static FILE            *g_map = NULL;
 static CRITICAL_SECTION g_mapLock;
 #define SEEN_SLOTS 32768
@@ -334,7 +334,7 @@ static int decode_props(_In_ PEVENT_RECORD ev,
     return n;
 }
 /* No live rendering. The authoritative output is the post-capture packet decode
-   (tls_group); conns.txt is fed by the TCP-table poller thread. This callback
+   (tls_group); connections.txt is fed by the TCP-table poller thread. This callback
    only serves the -v diagnostic dump. */
 static void WINAPI on_event(_In_ PEVENT_RECORD ev)
 {
@@ -413,7 +413,7 @@ static _Ret_maybenull_ FILE *open_map_file(void)
     path[length] = L'\0';
     slash = wcsrchr(path, L'\\');
     if (!slash || FAILED(StringCchCopyW(slash + 1,
-        ARRAYSIZE(path) - (size_t)(slash + 1 - path), L"conns.txt"))) return NULL;
+        ARRAYSIZE(path) - (size_t)(slash + 1 - path), L"connections.txt"))) return NULL;
 
     file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
@@ -460,7 +460,7 @@ int main(_In_ int argc, _In_reads_(argc) char **argv)
     lockInitialized = TRUE;
     g_map = open_map_file();
     if (!g_map) {
-        fprintf(stderr, "Unable to securely create conns.txt: %lu\n",
+        fprintf(stderr, "Unable to securely create connections.txt: %lu\n",
                 (unsigned long)GetLastError());
         goto cleanup;
     }
@@ -513,7 +513,7 @@ int main(_In_ int argc, _In_reads_(argc) char **argv)
     if (g_verbose)
         printf("== verbose: dumping Schannel + TCPIP events (Ctrl+C to stop) ==\n\n");
     else
-        printf("Listening for Schannel events (capturing to conns.txt)...\n"
+        printf("Listening for Schannel events (capturing to connections.txt)...\n"
                "Leave this open. When done, run stop-sch.ps1 in the parent window (it stops this), or press Ctrl+C here.\n");
 
     rc = ProcessTrace(&g_trace, 1, NULL, NULL);

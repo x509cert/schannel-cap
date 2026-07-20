@@ -2,7 +2,7 @@
   start-sch.ps1 [-FilterPid <int>]  --  begin TLS telemetry capture
     * resets any prior pktmon session
     * starts pktmon packet capture (all components, so loopback is included)
-    * runs the ETW listener (writes conns.txt for the PID join)
+    * runs the ETW listener (writes connections.txt for the PID join)
   Self-elevates. Run:  powershell -ExecutionPolicy Bypass -File start-sch.ps1
 #>
 param(
@@ -58,7 +58,7 @@ Write-Host '=== starting pktmon packet capture (full packets, all components) ..
 pktmon start --capture --comp all --pkt-size 0 -f $etl 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) { pktmon start --capture --pkt-size 0 -f $etl | Out-Null }
 
-Write-Host '=== launching ETW listener (conns.txt) in a new window ...'
+Write-Host '=== launching ETW listener (connections.txt) in a new window ...'
 if ($FilterPid) {
     Start-Process -FilePath $etw -ArgumentList @("$FilterPid") -WorkingDirectory $here
 } else {

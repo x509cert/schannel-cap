@@ -109,7 +109,7 @@ static const char *group_class(uint16_t g){
 
 static int g_csv = 0;   /* -csv: emit CSV for the PowerShell table */
 
-/* ---- optional 4-tuple -> PID/name map loaded from conns.txt ------------- */
+/* ---- optional 4-tuple -> PID/name map loaded from connections.txt -------- */
 typedef struct { char local[64]; char remote[64]; unsigned long pid; char proc[64]; } MapEnt;
 static MapEnt *g_map = NULL;
 static int     g_mapN = 0, g_mapCap = 0;
@@ -319,7 +319,7 @@ int main(int argc, char **argv)
           else if (pos == 2) { strncpy(g_filterIp, argv[i], sizeof(g_filterIp)-1); g_filterIp[sizeof(g_filterIp)-1] = 0; }
           ++pos;
       }
-      if (!argv0_pcap) { fprintf(stderr, "usage: tls_group <capture.pcapng> [conns.txt] [filter-ip] [-csv]\n"); return 2; }
+      if (!argv0_pcap) { fprintf(stderr, "usage: tls_group <capture.pcapng> [connections.txt] [filter-ip] [-csv]\n"); return 2; }
     }
     f = fopen(argv0_pcap, "rb");
     if (!f) { fprintf(stderr, "cannot open %s\n", argv0_pcap); return 1; }
@@ -331,7 +331,7 @@ int main(int argc, char **argv)
         printf("Time,PID,Process,Side,Source,Dest,Version,Cipher,Group,Class\n");
     else
         printf("negotiated groups from ServerHello in %s%s%s%s:\n\n",
-               argv0_pcap, g_mapN ? " (PID via conns.txt)" : "",
+               argv0_pcap, g_mapN ? " (PID via connections.txt)" : "",
                g_filterIp[0] ? " filtered to " : "", g_filterIp);
 
     /* pcapng: iterate blocks: type(4) totallen(4) body(totallen-12) totallen(4) */

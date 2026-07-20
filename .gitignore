@@ -10,6 +10,6 @@
 # Capture / runtime artifacts
 *.etl
 *.pcapng
-conns.txt
+connections.txt
 tls.etl
 tls.pcapng

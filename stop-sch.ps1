@@ -26,7 +26,7 @@ if (-not $isAdmin) {
 
 $etl    = Join-Path $here 'tls.etl'
 $pcap   = Join-Path $here 'tls.pcapng'
-$conns  = Join-Path $here 'conns.txt'
+$connections = Join-Path $here 'connections.txt'
 $decode = Join-Path $here 'tls_group.exe'
 
 Write-Host '=== stopping pktmon capture ...'
@@ -49,7 +49,7 @@ if ($FilterIp) { Write-Host "=== negotiated groups (ServerHello) -- filtered to 
 else           { Write-Host '=== negotiated groups (ServerHello) ===' }
 Write-Host 'Decoding capture (progress below; large captures take a moment)...'
 
-$da = @($pcap, $conns)
+$da = @($pcap, $connections)
 if ($FilterIp) { $da += $FilterIp }
 $da += '-csv'
 

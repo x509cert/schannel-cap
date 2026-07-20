@@ -34,8 +34,8 @@ start-sch.ps1
 stop-sch.ps1 -FilterIp 192.168.1.52
 
 # run the decoder by hand on any pcapng (text, or CSV)
-tls_group.exe tls.pcapng conns.txt
-tls_group.exe tls.pcapng conns.txt 192.168.1.52 -csv
+tls_group.exe tls.pcapng connections.txt
+tls_group.exe tls.pcapng connections.txt 192.168.1.52 -csv
 ```
 
 Must run **elevated** (scripts self-elevate). Same-box `127.0.0.1` traffic isn't
@@ -48,8 +48,8 @@ captured on this machine class — drive the handshake from another host (see
 
 | File | What it is |
 |------|------------|
-| `schannel_etw.cpp` | C++ ETW listener. Continuously snapshots the TCP table and writes `conns.txt` (`localIP:port remoteIP:port PID`) for the PID join. `-v` dumps raw Schannel/TCPIP events (self-describing via TDH). |
-| `tls_group.cpp` | C++ pcapng parser that pulls the negotiated cipher + group out of each ServerHello and attaches the owning PID from `conns.txt`. |
+| `schannel_etw.cpp` | C++ ETW listener. Continuously snapshots the TCP table and writes `connections.txt` (`localIP:port remoteIP:port PID`) for the PID join. `-v` dumps raw Schannel/TCPIP events (self-describing via TDH). |
+| `tls_group.cpp` | C++ pcapng parser that pulls the negotiated cipher + group out of each ServerHello and attaches the owning PID from `connections.txt`. |
 | `build.cmd` | Builds `schannel_etw.exe` and `tls_group.exe`. |
 | `start-sch.ps1` | Starts pktmon capture + the ETW listener. Self-elevating. |
 | `stop-sch.ps1` | Stops capture, converts ETL→pcapng, and prints the correlated result. Self-elevating. |
@@ -176,7 +176,7 @@ packet-level detail.
 You can also run the decoder directly on any pcapng (text output, or `-csv`):
 
 ```
-tls_group.exe tls.pcapng conns.txt [filter-ip] [-csv]
+tls_group.exe tls.pcapng connections.txt [filter-ip] [-csv]
 ```
 
 ---
@@ -216,7 +216,7 @@ builds — it only exists on the wire (the ServerHello `key_share`). So:
 
 - **pktmon** captures packets → `tls_group` reads the ServerHello for the
   selected cipher + group.
-- **`schannel_etw`** polls the TCP table (`GetExtendedTcpTable`) into `conns.txt`
+- **`schannel_etw`** polls the TCP table (`GetExtendedTcpTable`) into `connections.txt`
   (`local remote PID processname`) → `tls_group` joins each ServerHello 4-tuple
   to the owning PID and process name. The name is resolved *live* during capture
   (`QueryFullProcessImageName`), because PIDs get reused — resolving it offline
@@ -254,7 +254,7 @@ interfaces and connect from another machine:
 - From another host: `curl -k https://<server-lan-ip>:8443/`.
 
 That traffic crosses the physical NIC pktmon is bound to and is captured
-normally. (`conns.txt` still resolves the PID because the server's socket is
+normally. (`connections.txt` still resolves the PID because the server's socket is
 local.)
 
 **On a real server** this is usually a non-issue: a Windows Server accepting TLS
@@ -274,6 +274,6 @@ client and server are the **same machine** (dev-box testing).
   in the networking stack (especially with `--comp all`), so the same ServerHello
   can appear several times. Pipe through `sort -Unique` in PowerShell if you want
   one line per connection:
-  `tls_group.exe tls.pcapng conns.txt | Sort-Object -Unique`
+  `tls_group.exe tls.pcapng connections.txt | Sort-Object -Unique`
 - `.ps1` execution policy: run with `-ExecutionPolicy Bypass` or
   `Unblock-File *.ps1` once after extracting.
