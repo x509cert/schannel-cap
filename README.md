@@ -15,10 +15,15 @@ reject.
 ## Quickstart
 
 ```powershell
-build.cmd                                             # 1. build (VS tools)
-powershell -ExecutionPolicy Bypass -File start-sch.ps1 -Port 8443   # 2. capture
+# 1. build (VS tools)
+build.cmd
+
+# 2. capture       
+powershell -ExecutionPolicy Bypass -File start-sch.ps1 -Port 8443   
 #    ... from ANOTHER host:  curl --http1.1 -k https://<server-ip>:8443/
-powershell -ExecutionPolicy Bypass -File stop-sch.ps1    # 3. stop + colored table
+
+# 3. stop + colored table
+powershell -ExecutionPolicy Bypass -File stop-sch.ps1    
 ```
 
 Common variations:
