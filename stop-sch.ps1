@@ -1,13 +1,22 @@
 <#
-  stop-sch.ps1 [-FilterIp <ip>]  --  end capture and decode the negotiated group
+  stop-sch.ps1 [-FilterIp <ip>] [-FailuresOnly] [-MaskS] [-MaskD]
+    [-RedactStrings <string[]>]
+    -- end capture and decode the negotiated group
     * stops pktmon and the ETW listener
     * converts the ETL to pcapng and runs tls_group.exe
     * optional -FilterIp: only show handshakes involving that IP (either end)
+    * optional -FailuresOnly: show only Schannel warning/error/critical events
+    * optional -MaskS/-MaskD: mask source/destination IPv4 octets 2 and 3
+    * optional -RedactStrings: omit table rows containing any supplied string
   Self-elevates. Run:  powershell -ExecutionPolicy Bypass -File stop-sch.ps1
 #>
 param(
     [string]$FilterIp = '',
-    [switch]$Resolve            # replace IPs with reverse-DNS names (slow; cached)
+    [switch]$FailuresOnly,
+    [switch]$Resolve,           # replace IPs with reverse-DNS names (slow; cached)
+    [switch]$MaskS,
+    [switch]$MaskD,
+    [string[]]$RedactStrings = @()
 )
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -19,7 +28,14 @@ $isAdmin = ([Security.Principal.WindowsPrincipal] `
 if (-not $isAdmin) {
     $relaunch = @('-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"")
     if ($FilterIp) { $relaunch += @('-FilterIp',$FilterIp) }
+    if ($FailuresOnly) { $relaunch += '-FailuresOnly' }
     if ($Resolve)  { $relaunch += '-Resolve' }
+    if ($MaskS)    { $relaunch += '-MaskS' }
+    if ($MaskD)    { $relaunch += '-MaskD' }
+    if ($RedactStrings.Count) {
+        $relaunch += '-RedactStrings'
+        $relaunch += $RedactStrings
+    }
     Start-Process powershell -Verb RunAs -ArgumentList $relaunch
     return
 }
@@ -27,6 +43,7 @@ if (-not $isAdmin) {
 $etl    = Join-Path $here 'tls.etl'
 $pcap   = Join-Path $here 'tls.pcapng'
 $connections = Join-Path $here 'connections.txt'
+$failures = Join-Path $here 'schannel_failures.csv'
 $decode = Join-Path $here 'tls_group.exe'
 
 Write-Host '=== stopping pktmon capture ...'
@@ -36,33 +53,81 @@ Write-Host '=== stopping ETW listener / trace session (if running) ...'
 Stop-Process -Name schannel_etw -Force -ErrorAction SilentlyContinue
 logman stop SchannelRT_Consumer -ets 2>$null | Out-Null
 
-Write-Host "=== converting $etl to pcapng ..."
-pktmon pcapng $etl -o $pcap 2>$null | Out-Null
-if (-not (Test-Path $pcap)) { pktmon etl2pcap $etl -o $pcap 2>$null | Out-Null }
-if (-not (Test-Path $pcap)) {
-    Write-Host "[!] pcapng conversion failed. Try:  pktmon pcapng `"$etl`" -o `"$pcap`"" -ForegroundColor Red
-    Read-Host 'Press Enter'; return
+if (-not $FailuresOnly) {
+    Write-Host "=== converting $etl to pcapng ..."
+    pktmon pcapng $etl -o $pcap 2>$null | Out-Null
+    if (-not (Test-Path $pcap)) { pktmon etl2pcap $etl -o $pcap 2>$null | Out-Null }
+    if (-not (Test-Path $pcap)) {
+        Write-Host "[!] pcapng conversion failed; failure events can still be displayed." -ForegroundColor Red
+    }
 }
 
 Write-Host ''
-if ($FilterIp) { Write-Host "=== negotiated groups (ServerHello) -- filtered to $FilterIp ===" }
-else           { Write-Host '=== negotiated groups (ServerHello) ===' }
-Write-Host 'Decoding capture (progress below; large captures take a moment)...'
-
-$da = @($pcap, $connections)
-if ($FilterIp) { $da += $FilterIp }
-$da += '-csv'
-
-$rows = & $decode @da | ConvertFrom-Csv
-if (-not $rows) {
-    Write-Host '(no TLS ServerHello found in capture)' -ForegroundColor Yellow
+if ($FailuresOnly) {
+    Write-Host '=== Schannel failures ==='
+} elseif ($FilterIp) {
+    Write-Host "=== TLS results -- successful handshakes filtered to $FilterIp ==="
 } else {
+    Write-Host '=== TLS results ==='
+}
+
+$successRows = @()
+if (-not $FailuresOnly -and (Test-Path $pcap)) {
+    Write-Host 'Decoding capture (progress below; large captures take a moment)...'
+    $da = @($pcap, $connections)
+    if ($FilterIp) { $da += $FilterIp }
+    $da += '-csv'
+    $successRows = @(& $decode @da | ConvertFrom-Csv)
+
     # collapse duplicates from multi-point capture (same connection + params),
     # then order chronologically
-    $rows = $rows |
+    $successRows = @($successRows |
         Group-Object Source, Dest, Cipher, Group |
         ForEach-Object { $_.Group[0] } |
-        Sort-Object Time
+        ForEach-Object {
+            $_ | Select-Object *, @{ N='Result'; E={ 'Success' } },
+                @{ N='EventId'; E={ '' } }, @{ N='Level'; E={ '' } },
+                @{ N='Error'; E={ '' } }
+        })
+}
+
+$failureRows = @()
+if (Test-Path $failures) {
+    $failureRows = @(Import-Csv $failures | ForEach-Object {
+        [pscustomobject][ordered]@{
+            Time    = $_.Time
+            PID     = $_.PID
+            Process = $_.Process
+            Side    = '?'
+            Source  = '?'
+            Dest    = '?'
+            Version = '?'
+            Cipher  = '?'
+            Group   = '?'
+            Class   = ''
+            Result  = 'Failure'
+            EventId = $_.EventId
+            Level   = $_.Level
+            Error   = $_.Error
+        }
+    } | Group-Object Time, PID, EventId, Error | ForEach-Object { $_.Group[0] })
+}
+
+$rows = if ($FailuresOnly) {
+    @($failureRows)
+} else {
+    @($successRows) + @($failureRows)
+}
+$rows = @($rows | Sort-Object Time)
+
+if (-not $rows) {
+    $message = if ($FailuresOnly) {
+        '(no Schannel warning, error, or critical events captured)'
+    } else {
+        '(no TLS successes or failures captured)'
+    }
+    Write-Host $message -ForegroundColor Yellow
+} else {
 
     # optional reverse-DNS: replace the IP in Source/Dest with a name (keep port)
     if ($Resolve) {
@@ -76,8 +141,8 @@ if (-not $rows) {
         # collect unique IPs across both endpoints first, for a clean % denominator
         $ips = [System.Collections.Generic.HashSet[string]]::new()
         foreach ($r in $rows) {
-            $null = $ips.Add((Split-Ep $r.Source)[0])
-            $null = $ips.Add((Split-Ep $r.Dest)[0])
+            if ($r.Source -ne '?') { $null = $ips.Add((Split-Ep $r.Source)[0]) }
+            if ($r.Dest -ne '?') { $null = $ips.Add((Split-Ep $r.Dest)[0]) }
         }
 
         $dns = @{}
@@ -112,19 +177,64 @@ if (-not $rows) {
         }
 
         foreach ($r in $rows) {
-            $s = Split-Ep $r.Source
-            $d = Split-Ep $r.Dest
-            $sn = if ($dns.ContainsKey($s[0])) { $dns[$s[0]] } else { $s[0] }
-            $dn = if ($dns.ContainsKey($d[0])) { $dns[$d[0]] } else { $d[0] }
-            $r.Source = "$sn$($s[1])"
-            $r.Dest   = "$dn$($d[1])"
+            if ($r.Source -ne '?') {
+                $s = Split-Ep $r.Source
+                $sn = if ($dns.ContainsKey($s[0])) { $dns[$s[0]] } else { $s[0] }
+                $r.Source = "$sn$($s[1])"
+            }
+            if ($r.Dest -ne '?') {
+                $d = Split-Ep $r.Dest
+                $dn = if ($dns.ContainsKey($d[0])) { $dns[$d[0]] } else { $d[0] }
+                $r.Dest = "$dn$($d[1])"
+            }
         }
+    }
+
+    function Mask-IPv4Endpoint([string]$endpoint) {
+        if ($endpoint -match '^(\d{1,3})\.\d{1,3}\.\d{1,3}\.(\d{1,3})(:\d+)?$') {
+            return "$($Matches[1]).XXX.XXX.$($Matches[2])$($Matches[3])"
+        }
+        return $endpoint
+    }
+
+    if ($MaskS -or $MaskD) {
+        foreach ($r in $rows) {
+            if ($MaskS) { $r.Source = Mask-IPv4Endpoint $r.Source }
+            if ($MaskD) { $r.Dest = Mask-IPv4Endpoint $r.Dest }
+        }
+    }
+
+    # Redact complete table rows using the values that will actually be shown.
+    # IndexOf provides literal matching, so redaction strings are not regexes.
+    $redactTerms = @($RedactStrings | Where-Object {
+        -not [string]::IsNullOrEmpty($_)
+    })
+    if ($redactTerms.Count) {
+        $displayColumns = @('Time', 'Result', 'PID', 'Process', 'Source', 'Dest',
+                            'Version', 'Cipher', 'Group', 'EventId', 'Level', 'Error')
+        $rows = @($rows | Where-Object {
+            $row = $_
+            $line = ($displayColumns | ForEach-Object {
+                [string]$row.$_
+            }) -join ' '
+
+            $redact = $false
+            foreach ($term in $redactTerms) {
+                if ($line.IndexOf($term, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    $redact = $true
+                    break
+                }
+            }
+            -not $redact
+        })
     }
 
     # Per-cell color inside a real Format-Table via $PSStyle ANSI (PS 7.2+):
     #   TLS1.2 -> red;  hybrid / pqc group -> green.  Falls back to a plain
     #   table on Windows PowerShell 5.1 (no $PSStyle).
-    if ($PSStyle) {
+    if (-not $rows) {
+        Write-Host '(no table rows remain after redaction)' -ForegroundColor Yellow
+    } elseif ($PSStyle) {
         $red    = $PSStyle.Foreground.Red
         $green  = $PSStyle.Foreground.Green
         $orange = $PSStyle.Foreground.FromRgb(255,165,0)
@@ -135,7 +245,11 @@ if (-not $rows) {
         $PSStyle.OutputRendering = 'Ansi'
         $tbl = $rows |
             Select-Object `
-                Time, PID, Process, Source, Dest,
+                Time,
+                @{ N='Result'; E={
+                    if ($_.Result -eq 'Failure') { "$red$($_.Result)$reset" }
+                    else { $_.Result } }},
+                PID, Process, Source, Dest,
                 @{ N='Version'; E={
                     if ($_.Version -eq 'TLS1.2') { "$red$($_.Version)$reset" } else { $_.Version } }},
                 @{ N='Cipher'; E={
@@ -144,24 +258,35 @@ if (-not $rows) {
                         "$orange$($_.Cipher)$reset" } else { $_.Cipher } }},
                 @{ N='Group'; E={
                     if ($_.Class -in 'hybrid','pqc') { "$green$($_.Group)$reset" }
-                    else { $_.Group } }} |
-            Format-Table -AutoSize | Out-String -Width 500
+                    else { $_.Group } }},
+                EventId, Level, Error |
+            Format-Table -AutoSize -Wrap | Out-String -Width 500
         $PSStyle.OutputRendering = $prevRender
         Write-Host $tbl
     } else {
         $rows |
-            Format-Table Time, PID, Process, Source, Dest, Version, Cipher, Group -AutoSize |
+            Format-Table Time, Result, PID, Process, Source, Dest, Version,
+                Cipher, Group, EventId, Level, Error -AutoSize -Wrap |
             Out-String -Width 500 | Write-Host
     }
 
     # explain any unresolved PID/Process entries
-    if ($rows | Where-Object { $_.PID -eq '?' -or $_.Process -eq '?' }) {
+    if ($rows | Where-Object {
+        $_.Result -eq 'Success' -and ($_.PID -eq '?' -or $_.Process -eq '?')
+    }) {
         Write-Host ''
         Write-Host "Note: '?' in PID/Process = the connection wasn't in the TCP table when decoded --"
         Write-Host "      typically a short-lived connection that opened and closed between the 200ms"
         Write-Host "      polls, so no owning process could be attributed. The handshake is still valid."
     }
+    if ($failureRows) {
+        Write-Host ''
+        Write-Host "Note: failure endpoints are '?' because Schannel failure events do not reliably"
+        Write-Host '      include the connection tuple. EventId and Error retain the ETW diagnostics.'
+    }
 }
 
 Write-Host ''
-Write-Host "Full capture: $pcap  (open in Wireshark for detail)."
+if (Test-Path $pcap) {
+    Write-Host "Full capture: $pcap  (open in Wireshark for detail)."
+}

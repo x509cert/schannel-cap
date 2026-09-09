@@ -11,5 +11,6 @@
 *.etl
 *.pcapng
 connections.txt
+schannel_failures.csv
 tls.etl
 tls.pcapng

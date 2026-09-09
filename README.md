@@ -33,6 +33,15 @@ start-sch.ps1
 # decode only handshakes involving one IP
 stop-sch.ps1 -FilterIp 192.168.1.52
 
+# mask the second and third octets of source and destination IPv4 addresses
+stop-sch.ps1 -MaskS -MaskD
+
+# show only failed Schannel operations
+stop-sch.ps1 -FailuresOnly
+
+# omit table rows containing any listed string (case-insensitive)
+stop-sch.ps1 -RedactStrings 'OUTLOOK.EXE','20.94.35.60'
+
 # run the decoder by hand on any pcapng (text, or CSV)
 tls_group.exe tls.pcapng connections.txt
 tls_group.exe tls.pcapng connections.txt 192.168.1.52 -csv
@@ -48,7 +57,7 @@ captured on this machine class — drive the handshake from another host (see
 
 | File | What it is |
 |------|------------|
-| `schannel_etw.cpp` | C++ ETW listener. Continuously snapshots the TCP table and writes `connections.txt` (`localIP:port remoteIP:port PID`) for the PID join. `-v` dumps raw Schannel/TCPIP events (self-describing via TDH). |
+| `schannel_etw.cpp` | C++ ETW listener. Continuously snapshots the TCP table into `connections.txt` for the PID join and writes Schannel warning/error/critical events to `schannel_failures.csv`. `-v` also dumps raw Schannel/TCPIP events (self-describing via TDH). |
 | `tls_group.cpp` | C++ pcapng parser that pulls the negotiated cipher + group out of each ServerHello and attaches the owning PID from `connections.txt`. |
 | `build.cmd` | Builds `schannel_etw.exe` and `tls_group.exe`. |
 | `start-sch.ps1` | Starts pktmon capture + the ETW listener. Self-elevating. |
@@ -148,6 +157,25 @@ Example output from `stop-sch.ps1`:
 (duplicate captures from multi-point capture are collapsed), with **per-cell
 color** via `$PSStyle`:
 
+- Successful ServerHello rows have `Result=Success`. Schannel events at warning,
+  error, or critical level have `Result=Failure`, a red Result cell, and include
+  their ETW `EventId`, `Level`, and decoded properties in `Error`.
+- Pass `-FailuresOnly` to display only failure rows:
+
+  ```powershell
+  stop-sch.ps1 -FailuresOnly
+  ```
+
+  Schannel failure events do not reliably contain a TCP connection tuple, so
+  their Source and Dest values are `?`. `-FilterIp` filters successful packet
+  rows only; use `-FailuresOnly` to isolate failures.
+- `-MaskS` and `-MaskD` independently mask source and destination IPv4
+  addresses by replacing the second and third octets with `XXX` (for example,
+  `192.168.1.52:59618` becomes `192.XXX.XXX.52:59618`). IPv6 addresses and names
+  produced by `-Resolve` are left unchanged.
+- `-RedactStrings` omits any table row containing one or more supplied strings.
+  Matching is literal and case-insensitive and applies to the displayed values,
+  including masked endpoints and reverse-DNS names produced by `-Resolve`.
 - The **Version** cell turns **red** on **TLS 1.2** (a migration/compliance flag).
 - The **Group** cell turns **green** for a **TLS 1.3 PQC hybrid** (or pure-PQC)
   group; otherwise default.
@@ -223,6 +251,11 @@ builds — it only exists on the wire (the ServerHello `key_share`). So:
   would be unreliable. `svchost.exe` shows as-is (shared service host; the
   specific service isn't broken out). Exact, loopback-safe, no ETW field-name
   guessing.
+- **`schannel_etw`** also records Schannel warning, error, and critical ETW
+  events in `schannel_failures.csv`. `stop-sch.ps1` merges these with successful
+  ServerHello rows. Failure records preserve the event ID, severity, PID,
+  process name, and decoded ETW properties, but show unknown endpoints when the
+  provider does not emit a connection tuple.
 
 **Why both?** The two sources answer different questions and neither alone is
 enough. Packet capture is the only place the negotiated group appears in the

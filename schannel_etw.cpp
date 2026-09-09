@@ -9,6 +9,8 @@
  *   - Opens the Schannel + TCPIP ETW session so -v can dump raw events for
  *     diagnostics. Without -v nothing is printed but a "Listening..." banner;
  *     the authoritative TLS output is tls_group's post-capture decode.
+ *   - Writes Schannel warning/error/critical events to schannel_failures.csv
+ *     so stop-sch.ps1 can include failed handshakes in its result table.
  *
  *  -v            : dump every property of every event (TDH self-describing)
  *  <pid> / -p N  : with -v, restrict the dump to one process
@@ -66,6 +68,7 @@ static volatile LONG           g_sessionStarted = 0;
 
 /* ---- connection map (connections.txt) writer ---------------------------- */
 static FILE            *g_map = NULL;
+static FILE            *g_failures = NULL;
 static CRITICAL_SECTION g_mapLock;
 #define SEEN_SLOTS 32768
 #define MAP_LINE_CAPACITY 224
@@ -230,6 +233,64 @@ static DWORD WINAPI conmap_thread(_In_opt_ LPVOID p)
 /* ---- TDH property decode ------------------------------------------------ */
 typedef struct { char name[64]; char val[256]; USHORT outType; } KV;
 #define MAX_KV 64
+#define FAILURE_DETAIL_CAPACITY 4096
+
+static const char *level_name(UCHAR level)
+{
+    switch (level) {
+    case TRACE_LEVEL_CRITICAL: return "Critical";
+    case TRACE_LEVEL_ERROR:    return "Error";
+    case TRACE_LEVEL_WARNING:  return "Warning";
+    default:                   return "Unknown";
+    }
+}
+
+static void csv_field(FILE *file, _In_z_ const char *value)
+{
+    const unsigned char *p = (const unsigned char *)(value ? value : "");
+    (void)fputc('"', file);
+    while (*p) {
+        if (*p == '"') (void)fputc('"', file);
+        (void)fputc(*p++, file);
+    }
+    (void)fputc('"', file);
+}
+
+static void failure_emit(_In_ const SYSTEMTIME *time, _In_ PEVENT_RECORD ev,
+                         _In_reads_(count) const KV *kv, int count)
+{
+    char timestamp[32], pid[16], process[64], eventId[16];
+    char details[FAILURE_DETAIL_CAPACITY] = "";
+    int i;
+
+    if (!g_failures || !time || !ev || !kv || count < 0) return;
+    if (sprintf_s(timestamp, sizeof(timestamp), "%02u:%02u:%02u.%03u",
+                  time->wHour, time->wMinute, time->wSecond,
+                  time->wMilliseconds) < 0) return;
+    if (sprintf_s(pid, sizeof(pid), "%lu",
+                  (unsigned long)ev->EventHeader.ProcessId) < 0) return;
+    if (sprintf_s(eventId, sizeof(eventId), "%u",
+                  ev->EventHeader.EventDescriptor.Id) < 0) return;
+    pid_name(ev->EventHeader.ProcessId, process, sizeof(process));
+
+    for (i = 0; i < count; ++i) {
+        char item[sizeof(kv[i].name) + sizeof(kv[i].val) + 4];
+        if (sprintf_s(item, sizeof(item), "%s%s=%s",
+                      i ? "; " : "", kv[i].name, kv[i].val) < 0) continue;
+        if (FAILED(StringCchCatA(details, ARRAYSIZE(details), item))) break;
+    }
+    if (!details[0]) (void)strcpy_s(details, sizeof(details),
+                                    "No event properties available");
+
+    csv_field(g_failures, timestamp); (void)fputc(',', g_failures);
+    csv_field(g_failures, pid); (void)fputc(',', g_failures);
+    csv_field(g_failures, process); (void)fputc(',', g_failures);
+    csv_field(g_failures, eventId); (void)fputc(',', g_failures);
+    csv_field(g_failures, level_name(ev->EventHeader.EventDescriptor.Level));
+    (void)fputc(',', g_failures);
+    csv_field(g_failures, details); (void)fputc('\n', g_failures);
+    (void)fflush(g_failures);
+}
 
 static _Ret_maybenull_ LPCWSTR info_string(
     _In_reads_bytes_(infoSize) const TRACE_EVENT_INFO *info,
@@ -341,11 +402,13 @@ static void WINAPI on_event(_In_ PEVENT_RECORD ev)
     PTRACE_EVENT_INFO info = NULL; DWORD sz = 0; TDHSTATUS st;
     KV kv[MAX_KV]; int n, i, isSchannel, isTcpip;
     FILETIME fu, fl; SYSTEMTIME lt;
+    UCHAR level;
 
-    if (!ev || !g_verbose) return;
+    if (!ev) return;
     if (g_filterPid && ev->EventHeader.ProcessId != g_filterPid) return;
     isSchannel = IsEqualGUID(ev->EventHeader.ProviderId, SchannelGuid);
     isTcpip    = IsEqualGUID(ev->EventHeader.ProviderId, TcpipGuid);
+    if (!g_verbose && !isSchannel) return;
 
     st = TdhGetEventInformation(ev, 0, NULL, info, &sz);
     if (st == ERROR_INSUFFICIENT_BUFFER &&
@@ -360,11 +423,20 @@ static void WINAPI on_event(_In_ PEVENT_RECORD ev)
     fu.dwLowDateTime = ev->EventHeader.TimeStamp.LowPart;
     fu.dwHighDateTime = ev->EventHeader.TimeStamp.HighPart;
     FileTimeToLocalFileTime(&fu,&fl); FileTimeToSystemTime(&fl,&lt);
-    printf("%02u:%02u:%02u.%03u  PID=%lu  %s  event=%u\n",
-           lt.wHour,lt.wMinute,lt.wSecond,lt.wMilliseconds, ev->EventHeader.ProcessId,
-           isSchannel?"Schannel":isTcpip?"TCPIP":"?", ev->EventHeader.EventDescriptor.Id);
-    for (i=0;i<n;++i) printf("    %-22s = %s\n", kv[i].name, kv[i].val);
-    printf("\n");
+    level = ev->EventHeader.EventDescriptor.Level;
+    if (isSchannel && level >= TRACE_LEVEL_CRITICAL &&
+        level <= TRACE_LEVEL_WARNING)
+        failure_emit(&lt, ev, kv, n);
+
+    if (g_verbose) {
+        printf("%02u:%02u:%02u.%03u  PID=%lu  %s  event=%u level=%u\n",
+               lt.wHour,lt.wMinute,lt.wSecond,lt.wMilliseconds,
+               ev->EventHeader.ProcessId,
+               isSchannel?"Schannel":isTcpip?"TCPIP":"?",
+               ev->EventHeader.EventDescriptor.Id, level);
+        for (i=0;i<n;++i) printf("    %-22s = %s\n", kv[i].name, kv[i].val);
+        printf("\n");
+    }
     free(info);
 }
 
@@ -400,7 +472,7 @@ static BOOL parse_pid(_In_z_ const char *text, _Out_ DWORD *pid)
     return TRUE;
 }
 
-static _Ret_maybenull_ FILE *open_map_file(void)
+static _Ret_maybenull_ FILE *open_output_file(_In_z_ const WCHAR *fileName)
 {
     WCHAR path[32768], *slash;
     DWORD length;
@@ -412,8 +484,8 @@ static _Ret_maybenull_ FILE *open_map_file(void)
     if (!length || length >= ARRAYSIZE(path)) return NULL;
     path[length] = L'\0';
     slash = wcsrchr(path, L'\\');
-    if (!slash || FAILED(StringCchCopyW(slash + 1,
-        ARRAYSIZE(path) - (size_t)(slash + 1 - path), L"connections.txt"))) return NULL;
+    if (!slash || !fileName || FAILED(StringCchCopyW(slash + 1,
+        ARRAYSIZE(path) - (size_t)(slash + 1 - path), fileName))) return NULL;
 
     file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
@@ -458,12 +530,20 @@ int main(_In_ int argc, _In_reads_(argc) char **argv)
 
     InitializeCriticalSection(&g_mapLock);
     lockInitialized = TRUE;
-    g_map = open_map_file();
+    g_map = open_output_file(L"connections.txt");
     if (!g_map) {
         fprintf(stderr, "Unable to securely create connections.txt: %lu\n",
                 (unsigned long)GetLastError());
         goto cleanup;
     }
+    g_failures = open_output_file(L"schannel_failures.csv");
+    if (!g_failures) {
+        fprintf(stderr, "Unable to securely create schannel_failures.csv: %lu\n",
+                (unsigned long)GetLastError());
+        goto cleanup;
+    }
+    (void)fprintf(g_failures, "Time,PID,Process,EventId,Level,Error\n");
+    (void)fflush(g_failures);
     hcm = CreateThread(NULL, 0, conmap_thread, NULL, 0, NULL);
     if (!hcm) {
         fprintf(stderr, "CreateThread failed: %lu\n", (unsigned long)GetLastError());
@@ -513,7 +593,7 @@ int main(_In_ int argc, _In_reads_(argc) char **argv)
     if (g_verbose)
         printf("== verbose: dumping Schannel + TCPIP events (Ctrl+C to stop) ==\n\n");
     else
-        printf("Listening for Schannel events (capturing to connections.txt)...\n"
+        printf("Listening for Schannel events (capturing connections and failures)...\n"
                "Leave this open. When done, run stop-sch.ps1 in the parent window (it stops this), or press Ctrl+C here.\n");
 
     rc = ProcessTrace(&g_trace, 1, NULL, NULL);
@@ -535,6 +615,7 @@ cleanup:
         (void)CloseHandle(hcm);
     }
     if (g_map) { (void)fclose(g_map); g_map = NULL; }
+    if (g_failures) { (void)fclose(g_failures); g_failures = NULL; }
     free(g_props); g_props = NULL;
     if (lockInitialized) DeleteCriticalSection(&g_mapLock);
     return exitCode;
