@@ -147,9 +147,10 @@ powershell -ExecutionPolicy Bypass -File start-sch.ps1 -Port 8443
 
 `-Port`, `-IpA`, `-IpB` become one pktmon filter entry whose conditions are
 AND-ed (traffic on that port **and** between those IPs). Packet size is kept
-full — a PQC-hybrid ServerHello's `key_share` is ~1.1 KB, so truncating would
-lose the group; the size win comes from dropping non-matching connections, not
-from shortening packets.
+full — a post-quantum or hybrid ServerHello's `key_share` can exceed one TCP
+segment, so `tls_group` performs bounded sequence-aware reassembly. Truncating
+packets would still lose the group; the size win comes from dropping
+non-matching connections, not from shortening packets.
 
 If the server transfers large response bodies and the ETL is still big after
 port-filtering, capture only the handshake window: run `stop-sch.ps1` a second
@@ -252,8 +253,8 @@ To add a new group, extend `group_name()` in `tls_group.cpp`.
 The negotiated **group** is not present in Schannel's ETW events on current
 builds — it only exists on the wire (the ServerHello `key_share`). So:
 
-- **pktmon** captures packets → `tls_group` reads the ServerHello for the
-  selected cipher + group.
+- **pktmon** captures packets → `tls_group` reassembles fragmented TLS handshake
+  records and reads the ServerHello for the selected cipher + group.
 - **`schannel_etw`** polls the TCP table (`GetExtendedTcpTable`) into `connections.txt`
   (`local remote PID processname`) → `tls_group` joins each ServerHello 4-tuple
   to the owning PID and process name. The name is resolved *live* during capture

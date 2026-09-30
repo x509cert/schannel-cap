@@ -16,9 +16,9 @@
  *     pktmon etl2pcap C:\temp\tls.etl -o C:\temp\tls.pcapng   (writes pcapng)
  *     tls_group.exe C:\temp\tls.pcapng
  *
- * Scope: parses Ethernet/NULL/RAW link layers, IPv4/IPv6, TCP, and a ServerHello
- * that fits in one segment (true in practice -- ServerHello is small; only the
- * ML-KEM *ClientHello* is large). No TCP reassembly.
+ * Scope: parses Ethernet/NULL/RAW link layers, IPv4/IPv6, TCP, and TLS
+ * ServerHello records. Bounded TCP reassembly handles a handshake record split
+ * across segments, including large post-quantum and hybrid key_share values.
  *
  * BUILD:  cl /nologo /O2 /MT /W4 /GS /guard:cf /Qspectre /sdl ^
  *         /std:c++20 /permissive- /EHsc /D_CRT_SECURE_NO_WARNINGS ^
@@ -37,6 +37,23 @@ static int g_swap = 0;                    /* pcapng section byte-order */
 static uint16_t g_linktype = 1;           /* from first IDB (1 = Ethernet) */
 static uint64_t g_tsDenom = 1000000;      /* pcapng ticks/sec (if_tsresol; default us) */
 static uint64_t g_pktTicks = 0;           /* current packet timestamp (ticks) */
+
+#define MAX_REASSEMBLY_FLOWS 256
+#define MAX_TLS_RECORD_BYTES (5u + UINT16_MAX)
+
+typedef struct {
+    int active;
+    char src[64];
+    char dst[64];
+    uint32_t nextSeq;
+    uint32_t length;
+    uint32_t expected;
+    uint64_t age;
+    uint8_t *data;
+} ReassemblyFlow;
+
+static ReassemblyFlow g_reassembly[MAX_REASSEMBLY_FLOWS];
+static uint64_t g_reassemblyAge = 0;
 
 static uint16_t rd16(const uint8_t *p){ return g_swap ? (uint16_t)(p[0]<<8|p[1]) : (uint16_t)(p[1]<<8|p[0]); }
 static uint32_t rd32(const uint8_t *p){ return g_swap ? ((uint32_t)p[0]<<24|p[1]<<16|p[2]<<8|p[3])
@@ -261,9 +278,129 @@ static void scan_tls(const uint8_t *p, uint32_t len, const char *src, const char
     }
 }
 
+static void reassembly_clear(ReassemblyFlow *flow)
+{
+    if (!flow) return;
+    free(flow->data);
+    ZeroMemory(flow, sizeof(*flow));
+}
+
+static ReassemblyFlow *reassembly_find(const char *src, const char *dst)
+{
+    int i;
+    for (i = 0; i < MAX_REASSEMBLY_FLOWS; ++i) {
+        ReassemblyFlow *flow = &g_reassembly[i];
+        if (flow->active && strcmp(flow->src, src) == 0 &&
+            strcmp(flow->dst, dst) == 0) return flow;
+    }
+    return NULL;
+}
+
+static ReassemblyFlow *reassembly_acquire(const char *src, const char *dst)
+{
+    ReassemblyFlow *slot = NULL;
+    int i;
+    for (i = 0; i < MAX_REASSEMBLY_FLOWS; ++i) {
+        ReassemblyFlow *flow = &g_reassembly[i];
+        if (!flow->active) {
+            slot = flow;
+            break;
+        }
+        if (!slot || flow->age < slot->age) slot = flow;
+    }
+    if (!slot) return NULL;
+    reassembly_clear(slot);
+    if (strcpy_s(slot->src, sizeof(slot->src), src) != 0 ||
+        strcpy_s(slot->dst, sizeof(slot->dst), dst) != 0) {
+        reassembly_clear(slot);
+        return NULL;
+    }
+    slot->active = 1;
+    slot->age = ++g_reassemblyAge;
+    return slot;
+}
+
+static void reassembly_start(uint32_t seq, const uint8_t *p, uint32_t len,
+                             const char *src, const char *dst)
+{
+    ReassemblyFlow *flow;
+    uint32_t expected;
+    if (!p || len < 5 || p[0] != 22 || p[1] != 3) return;
+    expected = 5u + be16(p + 3);
+    if (expected <= len || expected > MAX_TLS_RECORD_BYTES) return;
+    flow = reassembly_acquire(src, dst);
+    if (!flow) return;
+    flow->data = (uint8_t *)malloc(expected);
+    if (!flow->data) {
+        reassembly_clear(flow);
+        return;
+    }
+    memcpy(flow->data, p, len);
+    flow->length = len;
+    flow->expected = expected;
+    flow->nextSeq = seq + len;
+}
+
+static void process_tcp_payload(uint32_t seq, const uint8_t *p, uint32_t len,
+                                const char *src, const char *dst)
+{
+    ReassemblyFlow *flow = reassembly_find(src, dst);
+    if (flow) {
+        int32_t delta = (int32_t)(seq - flow->nextSeq);
+        uint32_t overlap = 0, available, needed, take;
+        if (delta > 0) {
+            reassembly_clear(flow);
+            flow = NULL;
+        } else {
+            if (delta < 0) overlap = flow->nextSeq - seq;
+            if (overlap >= len) {
+                flow->age = ++g_reassemblyAge;
+                return;
+            }
+            available = len - overlap;
+            needed = flow->expected - flow->length;
+            take = available < needed ? available : needed;
+            memcpy(flow->data + flow->length, p + overlap, take);
+            flow->length += take;
+            flow->nextSeq += take;
+            flow->age = ++g_reassemblyAge;
+            if (flow->length == flow->expected) {
+                uint32_t consumed = overlap + take;
+                scan_tls(flow->data, flow->length, src, dst);
+                reassembly_clear(flow);
+                if (consumed < len)
+                    process_tcp_payload(seq + consumed, p + consumed,
+                                        len - consumed, src, dst);
+            }
+            return;
+        }
+    }
+
+    {
+        uint32_t offset = 0;
+        while (len - offset >= 5 && p[offset] == 22 && p[offset + 1] == 3) {
+            uint32_t expected = 5u + be16(p + offset + 3);
+            if (expected > len - offset) {
+                reassembly_start(seq + offset, p + offset, len - offset, src, dst);
+                return;
+            }
+            scan_tls(p + offset, expected, src, dst);
+            offset += expected;
+        }
+    }
+}
+
+static void reassembly_free_all(void)
+{
+    int i;
+    for (i = 0; i < MAX_REASSEMBLY_FLOWS; ++i)
+        reassembly_clear(&g_reassembly[i]);
+}
+
 static void handle_packet(const uint8_t *p, uint32_t caplen)
 {
     uint32_t o = 0;
+    uint32_t seq;
     uint8_t  ipVer, proto;
     char src[46] = "?", dst[46] = "?", srcep[64], dstep[64];
     uint16_t ethType, sport, dport, ihl, thl;
@@ -302,13 +439,15 @@ static void handle_packet(const uint8_t *p, uint32_t caplen)
     if (o + 20 > caplen) return;
 
     sport = be16(p + o); dport = be16(p + o + 2);
+    seq = ((uint32_t)p[o + 4] << 24) | ((uint32_t)p[o + 5] << 16) |
+          ((uint32_t)p[o + 6] << 8) | p[o + 7];
     thl = (uint16_t)(((p[o + 12] >> 4) & 0xF) * 4);
     if (thl < 20 || thl > caplen - o) return;
     o += thl;
 
     sprintf(srcep, "%s:%u", src, sport);
     sprintf(dstep, "%s:%u", dst, dport);
-    scan_tls(p + o, caplen - o, srcep, dstep);
+    process_tcp_payload(seq, p + o, caplen - o, srcep, dstep);
 }
 
 int main(int argc, char **argv)
@@ -417,6 +556,7 @@ int main(int argc, char **argv)
         free(body);
     }
     if (total_bytes) fprintf(stderr, "\r              \r");   /* wipe the progress line */
+    reassembly_free_all();
     fclose(f);
     return 0;
 }
