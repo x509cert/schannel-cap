@@ -1,9 +1,12 @@
+#Requires -RunAsAdministrator
+
 <#
   start-sch.ps1 [-FilterPid <int>]  --  begin TLS telemetry capture
     * resets any prior pktmon session
     * starts pktmon packet capture (all components, so loopback is included)
     * runs the ETW listener (writes connections.txt and schannel_failures.csv)
-  Self-elevates. Run:  powershell -ExecutionPolicy Bypass -File start-sch.ps1
+  Run from an elevated PowerShell window:
+    powershell -ExecutionPolicy Bypass -File start-sch.ps1
 #>
 param(
     [int]$FilterPid = 0,
@@ -13,20 +16,6 @@ param(
 )
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-
-# ---- self-elevate ---------------------------------------------------------
-$isAdmin = ([Security.Principal.WindowsPrincipal] `
-    [Security.Principal.WindowsIdentity]::GetCurrent()
-  ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    $relaunch = @('-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"")
-    if ($FilterPid) { $relaunch += @('-FilterPid',"$FilterPid") }
-    if ($Port)      { $relaunch += @('-Port',"$Port") }
-    if ($IpA)       { $relaunch += @('-IpA',$IpA) }
-    if ($IpB)       { $relaunch += @('-IpB',$IpB) }
-    Start-Process powershell -Verb RunAs -ArgumentList $relaunch
-    return
-}
 
 $etw = Join-Path $here 'schannel_etw.exe'
 $etl = Join-Path $here 'tls.etl'

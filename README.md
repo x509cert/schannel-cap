@@ -52,7 +52,9 @@ tls_group.exe tls.pcapng connections.txt
 tls_group.exe tls.pcapng connections.txt 192.168.1.52 -csv
 ```
 
-Must run **elevated** (scripts self-elevate). Same-box `127.0.0.1` traffic isn't
+Must run from an **elevated PowerShell window** (Run as administrator). Both
+scripts stop with an error if not elevated; they do not prompt or self-elevate.
+Same-box `127.0.0.1` traffic isn't
 captured on this machine class — drive the handshake from another host (see
 [Same-machine limitation](#same-machine-limitation-important)).
 
@@ -65,8 +67,8 @@ captured on this machine class — drive the handshake from another host (see
 | `schannel_etw.cpp` | C++ ETW listener. Continuously snapshots the TCP table into `connections.txt` for the PID join and writes Schannel warning/error/critical events to `schannel_failures.csv`. `-v` also dumps raw Schannel/TCPIP events (self-describing via TDH). |
 | `tls_group.cpp` | C++ pcapng parser that pulls the negotiated cipher + group out of each ServerHello and attaches the owning PID from `connections.txt`. |
 | `build.cmd` | Builds `schannel_etw.exe` and `tls_group.exe`. |
-| `start-sch.ps1` | Starts pktmon capture + the ETW listener. Self-elevating. |
-| `stop-sch.ps1` | Stops capture, converts ETL→pcapng, and prints the correlated result. Self-elevating. |
+| `start-sch.ps1` | Starts pktmon capture + the ETW listener. Requires an elevated PowerShell window. |
+| `stop-sch.ps1` | Stops capture, converts ETL→pcapng, and prints the correlated result. Requires an elevated PowerShell window. |
 | `README.md` | This file. |
 
 ---
@@ -82,8 +84,8 @@ captured on this machine class — drive the handshake from another host (see
   these tools are out-of-process so the build arch need not match the traffic.
   - Libraries used (all part of the Windows SDK, no third-party): `tdh.lib`,
     `advapi32.lib`, `iphlpapi.lib`, `ws2_32.lib`.
-- **Administrator rights** — ETW sessions and pktmon require elevation (the
-  `.ps1` scripts self-elevate).
+- **Administrator rights** — ETW sessions and pktmon require elevation. Open
+  PowerShell with **Run as administrator** before running the `.ps1` scripts.
 - **PowerShell** to run the scripts. On a fresh box, launch with
   `-ExecutionPolicy Bypass` (see below) or `Unblock-File *.ps1` once.
 
@@ -107,7 +109,7 @@ Produces `schannel_etw.exe` and `tls_group.exe` in this folder.
 ## Run
 
 ```powershell
-# 1. start capture (self-elevates)
+# 1. start capture (run from an elevated PowerShell window)
 powershell -ExecutionPolicy Bypass -File start-sch.ps1
 
 # 2. generate a TLS handshake against the server you want to observe

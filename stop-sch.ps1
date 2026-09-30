@@ -1,3 +1,5 @@
+#Requires -RunAsAdministrator
+
 <#
   stop-sch.ps1 [-FilterIp <ip>] [-FailuresOnly] [-MaskS] [-MaskD]
     [-RedactStrings <string[]>]
@@ -8,7 +10,8 @@
     * optional -FailuresOnly: show only Schannel warning/error/critical events
     * optional -MaskS/-MaskD: mask source/destination IPv4 octets 2 and 3
     * optional -RedactStrings: omit table rows containing any supplied string
-  Self-elevates. Run:  powershell -ExecutionPolicy Bypass -File stop-sch.ps1
+  Run from an elevated PowerShell window:
+    powershell -ExecutionPolicy Bypass -File stop-sch.ps1
 #>
 param(
     [string]$FilterIp = '',
@@ -20,25 +23,6 @@ param(
 )
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-
-# ---- self-elevate ---------------------------------------------------------
-$isAdmin = ([Security.Principal.WindowsPrincipal] `
-    [Security.Principal.WindowsIdentity]::GetCurrent()
-  ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    $relaunch = @('-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"")
-    if ($FilterIp) { $relaunch += @('-FilterIp',$FilterIp) }
-    if ($FailuresOnly) { $relaunch += '-FailuresOnly' }
-    if ($Resolve)  { $relaunch += '-Resolve' }
-    if ($MaskS)    { $relaunch += '-MaskS' }
-    if ($MaskD)    { $relaunch += '-MaskD' }
-    if ($RedactStrings.Count) {
-        $relaunch += '-RedactStrings'
-        $relaunch += $RedactStrings
-    }
-    Start-Process powershell -Verb RunAs -ArgumentList $relaunch
-    return
-}
 
 $etl    = Join-Path $here 'tls.etl'
 $pcap   = Join-Path $here 'tls.pcapng'
