@@ -27,9 +27,11 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 
 static int g_swap = 0;                    /* pcapng section byte-order */
 static uint16_t g_linktype = 1;           /* from first IDB (1 = Ethernet) */
@@ -133,9 +135,15 @@ static void map_load(const char *path)
         /* local remote PID [name] -- name optional for back-compat */
         if (sscanf(line, "%63s %63s %lu %63s", e.local, e.remote, &e.pid, e.proc) >= 3) {
             if (g_mapN == g_mapCap) {
-                g_mapCap = g_mapCap ? g_mapCap * 2 : 256;
-                g_map = (MapEnt *)realloc(g_map, g_mapCap * sizeof(MapEnt));
-                if (!g_map) { fclose(f); return; }
+                int newCap;
+                MapEnt *newMap;
+                if (g_mapCap > INT_MAX / 2) { fclose(f); return; }
+                newCap = g_mapCap ? g_mapCap * 2 : 256;
+                if ((size_t)newCap > SIZE_MAX / sizeof(MapEnt)) { fclose(f); return; }
+                newMap = (MapEnt *)realloc(g_map, (size_t)newCap * sizeof(MapEnt));
+                if (!newMap) { fclose(f); return; }
+                g_map = newMap;
+                g_mapCap = newCap;
             }
             g_map[g_mapN++] = e;
         }
@@ -200,7 +208,7 @@ static void parse_server_hello(const uint8_t *hs, uint32_t len,
       if (g_csv) {
           char pidbuf[16], grp[64], cip[64], pname[64];
           const char *gn = selGroup ? group_name(selGroup) : "none";
-          if (pid) _snprintf(pidbuf, sizeof(pidbuf), "%lu", pid); else strcpy(pidbuf, "?");
+          if (pid) sprintf_s(pidbuf, sizeof(pidbuf), "%lu", pid); else strcpy(pidbuf, "?");
           /* Process: image name if known, else fall back to the PID */
           if (proc && proc[0] && strcmp(proc, "?") != 0) { strncpy(pname, proc, sizeof(pname)-1); pname[sizeof(pname)-1]=0; }
           else { strncpy(pname, pidbuf, sizeof(pname)-1); pname[sizeof(pname)-1]=0; }
@@ -271,12 +279,14 @@ static void handle_packet(const uint8_t *p, uint32_t caplen)
         if (caplen < 4) return;
         { uint32_t fam = rd32(p); o = 4; ipVer = (fam == 2) ? 4 : 6; }
     } else if (g_linktype == 101) {           /* RAW IP */
+        if (caplen < 1) return;
         ipVer = (p[0] >> 4) & 0xF;
     } else return;
 
     if (ipVer == 4) {
         if (o + 20 > caplen) return;
         ihl = (uint16_t)((p[o] & 0x0F) * 4);
+        if (ihl < 20 || ihl > caplen - o) return;
         proto = p[o + 9];
         sprintf(src, "%u.%u.%u.%u", p[o+12], p[o+13], p[o+14], p[o+15]);
         sprintf(dst, "%u.%u.%u.%u", p[o+16], p[o+17], p[o+18], p[o+19]);
@@ -293,8 +303,8 @@ static void handle_packet(const uint8_t *p, uint32_t caplen)
 
     sport = be16(p + o); dport = be16(p + o + 2);
     thl = (uint16_t)(((p[o + 12] >> 4) & 0xF) * 4);
+    if (thl < 20 || thl > caplen - o) return;
     o += thl;
-    if (o > caplen) return;
 
     sprintf(srcep, "%s:%u", src, sport);
     sprintf(dstep, "%s:%u", dst, dport);
@@ -305,7 +315,7 @@ int main(int argc, char **argv)
 {
     FILE *f;
     uint8_t hdr[12];
-    long fsize;
+    uint32_t bodySize, remainderSize;
     uint8_t *body;
     const char *argv0_pcap = NULL;
     long total_bytes = 0;
@@ -338,43 +348,71 @@ int main(int argc, char **argv)
     while (fread(hdr, 1, 8, f) == 8) {
         uint32_t type  = (uint32_t)hdr[0] | hdr[1]<<8 | hdr[2]<<16 | (uint32_t)hdr[3]<<24;
         uint32_t total = rd32(hdr + 4);       /* first SHB: LE default (Windows) */
-        if (total < 12) break;
+        if (total < 12 || (total & 3u) != 0) break;
+        if (total_bytes) {
+            long position = ftell(f);
+            if (position < 0 || position > total_bytes ||
+                (uint64_t)(total - 8) >
+                (uint64_t)(total_bytes - position)) break;
+        }
 
         if (total_bytes) {                     /* live % to stderr (stdout is the CSV) */
             int pct = (int)((uint64_t)ftell(f) * 100 / total_bytes);
             if (pct != last_pct) { fprintf(stderr, "\rProgress: %d%%  ", pct); fflush(stderr); last_pct = pct; }
         }
 
-        fsize = (long)total - 8;              /* body = block minus the 8 bytes read */
-        body = (uint8_t *)malloc(fsize);
+        bodySize = total - 12;                /* excludes 8-byte header and 4-byte trailer */
+        remainderSize = total - 8;            /* body plus trailing total length */
+        body = (uint8_t *)malloc(remainderSize);
         if (!body) break;
-        if (fread(body, 1, fsize, f) != (size_t)fsize) { free(body); break; }
+        if (fread(body, 1, remainderSize, f) != remainderSize) { free(body); break; }
+        if (memcmp(body + bodySize, hdr + 4, sizeof(uint32_t)) != 0) {
+            free(body);
+            break;
+        }
 
         if (type == 0x0A0D0D0A) {             /* Section Header: byte-order magic */
-            g_swap = !(body[0]==0x4D && body[1]==0x3C && body[2]==0x2B && body[3]==0x1A);
+            if (bodySize < 16) { free(body); break; }
+            if (body[0]==0x4D && body[1]==0x3C && body[2]==0x2B && body[3]==0x1A)
+                g_swap = 0;
+            else if (body[0]==0x1A && body[1]==0x2B && body[2]==0x3C && body[3]==0x4D)
+                g_swap = 1;
+            else { free(body); break; }
         } else if (type == 0x00000001) {      /* Interface Description: linktype */
+            if (bodySize < 8) { free(body); break; }
             g_linktype = rd16(body);
             /* parse options for if_tsresol (code 9): linktype(2) rsv(2) snap(4) opts */
             { uint32_t o = 8;
-              while (o + 4 <= (uint32_t)fsize) {
-                  uint16_t code = rd16(body + o), len = rd16(body + o + 2); o += 4;
+              while (o <= bodySize && bodySize - o >= 4) {
+                  uint16_t code = rd16(body + o), len = rd16(body + o + 2);
+                  uint32_t paddedLen;
+                  o += 4;
                   if (code == 0) break;                 /* opt_endofopt */
+                  paddedLen = ((uint32_t)len + 3u) & ~3u;
+                  if (paddedLen > bodySize - o) break;
                   if (code == 9 && len >= 1) {
                       uint8_t v = body[o];
-                      if (v & 0x80) { g_tsDenom = (uint64_t)1 << (v & 0x7F); }
-                      else { uint8_t e = v; g_tsDenom = 1; while (e--) g_tsDenom *= 10; }
+                      uint8_t e = v & 0x7F;
+                      if (v & 0x80) {
+                          if (e < 64) g_tsDenom = (uint64_t)1 << e;
+                      } else if (e <= 19) {
+                          g_tsDenom = 1;
+                          while (e--) g_tsDenom *= 10;
+                      }
                   }
-                  o += (len + 3u) & ~3u;                /* pad to 32-bit */
+                  o += paddedLen;
               }
             }
         } else if (type == 0x00000006) {      /* Enhanced Packet Block */
             /* body: iface(4) tsHi(4) tsLo(4) capLen(4) origLen(4) data... */
+            if (bodySize < 20) { free(body); break; }
             uint32_t capLen = rd32(body + 12);
             g_pktTicks = ((uint64_t)rd32(body + 4) << 32) | rd32(body + 8);
-            if (20 + capLen <= (uint32_t)fsize) handle_packet(body + 20, capLen);
+            if (capLen <= bodySize - 20) handle_packet(body + 20, capLen);
         } else if (type == 0x00000003) {      /* Simple Packet Block: origLen(4) data */
+            if (bodySize < 4) { free(body); break; }
             uint32_t origLen = rd32(body);
-            if (4 + origLen <= (uint32_t)fsize) handle_packet(body + 4, origLen);
+            if (origLen <= bodySize - 4) handle_packet(body + 4, origLen);
         }
         free(body);
     }

@@ -100,6 +100,9 @@ From a **Visual Studio Native Tools** prompt (or any shell with `cl` on PATH):
 
 ```
 build.cmd
+
+# opt-in deep MSVC static analysis for both binaries
+build.cmd /analyze
 ```
 
 Produces `schannel_etw.exe` and `tls_group.exe` in this folder.

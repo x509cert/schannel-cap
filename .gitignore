@@ -6,6 +6,7 @@
 *.obj
 *.pdb
 *.ilk
+*.nativecodeanalysis.xml
 
 # Capture / runtime artifacts
 *.etl

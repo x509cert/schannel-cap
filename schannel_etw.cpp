@@ -166,7 +166,7 @@ static void fmt_v6(_In_reads_(16) const UCHAR *a, DWORD port,
 
 static void poll_tcp_table(void)
 {
-    DWORD sz = 0, capacity;
+    DWORD sz = sizeof(MIB_TCPTABLE_OWNER_PID), capacity;
     /* IPv4 */
     if (GetExtendedTcpTable(NULL, &sz, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0)
             == ERROR_INSUFFICIENT_BUFFER &&
@@ -193,7 +193,7 @@ static void poll_tcp_table(void)
         free(t);
     }
     /* IPv6 */
-    sz = 0;
+    sz = sizeof(MIB_TCP6TABLE_OWNER_PID);
     if (GetExtendedTcpTable(NULL, &sz, FALSE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0)
             == ERROR_INSUFFICIENT_BUFFER &&
         sz >= (DWORD)FIELD_OFFSET(MIB_TCP6TABLE_OWNER_PID, table) &&
@@ -306,12 +306,15 @@ static _Ret_maybenull_ LPCWSTR info_string(
     return NULL;
 }
 
+_Success_(return != FALSE)
 static BOOL prop_length(_In_ PEVENT_RECORD ev,
                         _In_reads_bytes_(infoSize) PTRACE_EVENT_INFO info,
                         ULONG infoSize, USHORT i, _Out_ USHORT *length)
 {
     PEVENT_PROPERTY_INFO p;
-    if (!ev || !info || !length || i >= info->PropertyCount) return FALSE;
+    if (!length) return FALSE;
+    *length = 0;
+    if (!ev || !info || i >= info->PropertyCount) return FALSE;
     p = &info->EventPropertyInfoArray[i];
     if (p->Flags & PropertyParamLength) {
         PROPERTY_DATA_DESCRIPTOR d; DWORD val = 0;
@@ -334,7 +337,7 @@ static BOOL prop_length(_In_ PEVENT_RECORD ev,
 
 static int decode_props(_In_ PEVENT_RECORD ev,
                         _In_reads_bytes_(infoSize) PTRACE_EVENT_INFO info,
-                        ULONG infoSize, _Out_writes_(max) KV *kv, int max)
+                        ULONG infoSize, _Out_writes_to_(max, return) KV *kv, int max)
 {
     USHORT i, pointerSize, remaining; PBYTE pData; int n = 0;
     size_t propertyBytes;
@@ -400,7 +403,7 @@ static int decode_props(_In_ PEVENT_RECORD ev,
 static void WINAPI on_event(_In_ PEVENT_RECORD ev)
 {
     PTRACE_EVENT_INFO info = NULL; DWORD sz = 0; TDHSTATUS st;
-    KV kv[MAX_KV]; int n, i, isSchannel, isTcpip;
+    KV *kv = NULL; int n, i, isSchannel, isTcpip;
     FILETIME fu, fl; SYSTEMTIME lt;
     UCHAR level;
 
@@ -417,7 +420,8 @@ static void WINAPI on_event(_In_ PEVENT_RECORD ev)
         st = info ? TdhGetEventInformation(ev, 0, NULL, info, &sz) : ERROR_OUTOFMEMORY;
     }
     if (st != ERROR_SUCCESS || !info) { free(info); return; }
-    ZeroMemory(kv, sizeof(kv));
+    kv = (KV *)calloc(MAX_KV, sizeof(*kv));
+    if (!kv) { free(info); return; }
     n = decode_props(ev, info, sz, kv, MAX_KV);
 
     fu.dwLowDateTime = ev->EventHeader.TimeStamp.LowPart;
@@ -437,6 +441,7 @@ static void WINAPI on_event(_In_ PEVENT_RECORD ev)
         for (i=0;i<n;++i) printf("    %-22s = %s\n", kv[i].name, kv[i].val);
         printf("\n");
     }
+    free(kv);
     free(info);
 }
 
@@ -458,11 +463,14 @@ static BOOL WINAPI ctrl_handler(DWORD type)
     }
 }
 
+_Success_(return != FALSE)
 static BOOL parse_pid(_In_z_ const char *text, _Out_ DWORD *pid)
 {
     char *end;
     unsigned long value;
-    if (!text || !pid || !*text) return FALSE;
+    if (!pid) return FALSE;
+    *pid = 0;
+    if (!text || !*text) return FALSE;
     errno = 0;
     end = NULL;
     value = strtoul(text, &end, 10);
@@ -474,22 +482,38 @@ static BOOL parse_pid(_In_z_ const char *text, _Out_ DWORD *pid)
 
 static _Ret_maybenull_ FILE *open_output_file(_In_z_ const WCHAR *fileName)
 {
-    WCHAR path[32768], *slash;
+    const size_t pathCapacity = 32768;
+    WCHAR *path, *slash;
     DWORD length;
     HANDLE file;
     int descriptor;
     FILE *stream = NULL;
 
-    length = GetModuleFileNameW(NULL, path, ARRAYSIZE(path));
-    if (!length || length >= ARRAYSIZE(path)) return NULL;
+    if (!fileName) return NULL;
+    path = (WCHAR *)calloc(pathCapacity, sizeof(*path));
+    if (!path) {
+        SetLastError(ERROR_OUTOFMEMORY);
+        return NULL;
+    }
+    length = GetModuleFileNameW(NULL, path, (DWORD)pathCapacity);
+    if (!length || length >= pathCapacity) { free(path); return NULL; }
     path[length] = L'\0';
     slash = wcsrchr(path, L'\\');
-    if (!slash || !fileName || FAILED(StringCchCopyW(slash + 1,
-        ARRAYSIZE(path) - (size_t)(slash + 1 - path), fileName))) return NULL;
+    if (!slash || FAILED(StringCchCopyW(slash + 1,
+        pathCapacity - (size_t)(slash + 1 - path), fileName))) {
+        free(path);
+        return NULL;
+    }
 
     file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-    if (file == INVALID_HANDLE_VALUE) return NULL;
+    if (file == INVALID_HANDLE_VALUE) {
+        DWORD error = GetLastError();
+        free(path);
+        SetLastError(error);
+        return NULL;
+    }
+    free(path);
     descriptor = _open_osfhandle((intptr_t)file, _O_TEXT);
     if (descriptor == -1) { (void)CloseHandle(file); return NULL; }
     stream = _fdopen(descriptor, "w");
