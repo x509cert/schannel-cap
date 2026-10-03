@@ -62,18 +62,41 @@ static uint32_t rd32(const uint8_t *p){ return g_swap ? ((uint32_t)p[0]<<24|p[1]
 static uint16_t be16(const uint8_t *p){ return (uint16_t)(p[0]<<8 | p[1]); }
 static uint32_t be24(const uint8_t *p){ return (uint32_t)(p[0]<<16 | p[1]<<8 | p[2]); }
 
+static unsigned fraction_milliseconds(uint64_t remainder, uint64_t denominator)
+{
+    unsigned low = 0, high = 1000;
+    while (high - low > 1) {
+        unsigned mid = low + (high - low) / 2;
+        /* ceil(denominator * mid / 1000), without overflowing the product. */
+        uint64_t threshold = (denominator / 1000) * mid +
+                            ((denominator % 1000) * mid + 999) / 1000;
+        if (remainder >= threshold) low = mid;
+        else high = mid;
+    }
+    return low;
+}
+
 /* format the current packet's pcapng timestamp as local HH:MM:SS.mmm */
 static void fmt_time(char *out, size_t n)
 {
-    uint64_t sec, usec;
+    const uint64_t epoch = 116444736000000000ULL;
+    uint64_t sec, fraction;
     ULARGE_INTEGER u;
-    FILETIME ft, lf; SYSTEMTIME st;
-    if (!g_pktTicks || !g_tsDenom) { _snprintf(out, n, "--:--:--.---"); out[n-1]=0; return; }
-    sec  = g_pktTicks / g_tsDenom;
-    usec = (g_pktTicks % g_tsDenom) * 1000000ULL / g_tsDenom;
-    u.QuadPart = 116444736000000000ULL + sec * 10000000ULL + usec * 10ULL; /* Unix->FILETIME */
+    FILETIME ft = {}, lf = {}; SYSTEMTIME st = {};
+    _snprintf(out, n, "--:--:--.---"); out[n-1] = 0;
+    if (!g_pktTicks || !g_tsDenom) return;
+    sec = g_pktTicks / g_tsDenom;
+    fraction = (uint64_t)fraction_milliseconds(g_pktTicks % g_tsDenom, g_tsDenom) * 10000;
+    if (sec > ((uint64_t)INT64_MAX - epoch - fraction) / 10000000ULL) {
+        fprintf(stderr, "Capture timestamp is outside the supported FILETIME range.\n");
+        return;
+    }
+    u.QuadPart = epoch + sec * 10000000ULL + fraction;
     ft.dwLowDateTime = u.LowPart; ft.dwHighDateTime = u.HighPart;
-    FileTimeToLocalFileTime(&ft, &lf); FileTimeToSystemTime(&lf, &st);
+    if (!FileTimeToLocalFileTime(&ft, &lf) || !FileTimeToSystemTime(&lf, &st)) {
+        fprintf(stderr, "Cannot convert capture timestamp: %lu\n", GetLastError());
+        return;
+    }
     _snprintf(out, n, "%02u:%02u:%02u.%03u", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
     out[n-1] = 0;
 }
@@ -174,11 +197,10 @@ static void map_load(const char *path)
 static unsigned long map_lookup(const char *src, const char *dst,
                                 const char **side, const char **proc)
 {
-    int i;
-    for (i = 0; i < g_mapN; ++i)
+    for (int i = 0; i < g_mapN; ++i)
         if (strcmp(g_map[i].local, src) == 0 && strcmp(g_map[i].remote, dst) == 0) {
             *side = "srv"; if (proc) *proc = g_map[i].proc; return g_map[i].pid; }
-    for (i = 0; i < g_mapN; ++i)
+    for (int i = 0; i < g_mapN; ++i)
         if (strcmp(g_map[i].local, dst) == 0 && strcmp(g_map[i].remote, src) == 0) {
             *side = "cli"; if (proc) *proc = g_map[i].proc; return g_map[i].pid; }
     *side = "?"; if (proc) *proc = "";
@@ -287,8 +309,7 @@ static void reassembly_clear(ReassemblyFlow *flow)
 
 static ReassemblyFlow *reassembly_find(const char *src, const char *dst)
 {
-    int i;
-    for (i = 0; i < MAX_REASSEMBLY_FLOWS; ++i) {
+    for (int i = 0; i < MAX_REASSEMBLY_FLOWS; ++i) {
         ReassemblyFlow *flow = &g_reassembly[i];
         if (flow->active && strcmp(flow->src, src) == 0 &&
             strcmp(flow->dst, dst) == 0) return flow;
@@ -299,8 +320,7 @@ static ReassemblyFlow *reassembly_find(const char *src, const char *dst)
 static ReassemblyFlow *reassembly_acquire(const char *src, const char *dst)
 {
     ReassemblyFlow *slot = NULL;
-    int i;
-    for (i = 0; i < MAX_REASSEMBLY_FLOWS; ++i) {
+    for (int i = 0; i < MAX_REASSEMBLY_FLOWS; ++i) {
         ReassemblyFlow *flow = &g_reassembly[i];
         if (!flow->active) {
             slot = flow;
@@ -392,8 +412,7 @@ static void process_tcp_payload(uint32_t seq, const uint8_t *p, uint32_t len,
 
 static void reassembly_free_all(void)
 {
-    int i;
-    for (i = 0; i < MAX_REASSEMBLY_FLOWS; ++i)
+    for (int i = 0; i < MAX_REASSEMBLY_FLOWS; ++i)
         reassembly_clear(&g_reassembly[i]);
 }
 
@@ -431,8 +450,8 @@ static void handle_packet(const uint8_t *p, uint32_t caplen)
     } else {                                  /* IPv6 (no ext-header handling) */
         if (o + 40 > caplen) return;
         proto = p[o + 6];
-        { int k; char *q = src; for (k=0;k<16;k+=2){ q += sprintf(q, k?":%02x%02x":"%02x%02x", p[o+8+k], p[o+9+k]); }
-          q = dst; for (k=0;k<16;k+=2){ q += sprintf(q, k?":%02x%02x":"%02x%02x", p[o+24+k], p[o+25+k]); } }
+        { char *q = src; for (int k = 0; k < 16; k += 2){ q += sprintf(q, k?":%02x%02x":"%02x%02x", p[o+8+k], p[o+9+k]); }
+          q = dst; for (int k = 0; k < 16; k += 2){ q += sprintf(q, k?":%02x%02x":"%02x%02x", p[o+24+k], p[o+25+k]); } }
         o += 40;
     }
     if (proto != 6) return;                   /* TCP only */
@@ -457,11 +476,13 @@ int main(int argc, char **argv)
     uint32_t bodySize, remainderSize;
     uint8_t *body;
     const char *argv0_pcap = NULL;
-    long total_bytes = 0;
+    int64_t total_bytes;
+    size_t headerBytes;
+    int exitCode = 0;
     int  last_pct = -1;
 
-    { int i, pos = 0;
-      for (i = 1; i < argc; ++i) {
+    { int pos = 0;
+      for (int i = 1; i < argc; ++i) {
           if (strcmp(argv[i], "-csv") == 0) { g_csv = 1; continue; }
           if (pos == 0) argv0_pcap = argv[i];
           else if (pos == 1) map_load(argv[i]);
@@ -474,7 +495,12 @@ int main(int argc, char **argv)
     if (!f) { fprintf(stderr, "cannot open %s\n", argv0_pcap); return 1; }
 
     /* total size for the progress counter */
-    fseek(f, 0, SEEK_END); { long tsz = ftell(f); total_bytes = tsz > 0 ? tsz : 0; } fseek(f, 0, SEEK_SET);
+    if (_fseeki64(f, 0, SEEK_END) != 0 || (total_bytes = _ftelli64(f)) < 0 ||
+        _fseeki64(f, 0, SEEK_SET) != 0) {
+        fprintf(stderr, "Cannot determine capture file size.\n");
+        fclose(f);
+        return 1;
+    }
 
     if (g_csv)
         printf("Time,PID,Process,Side,Source,Dest,Version,Cipher,Group,Class\n");
@@ -484,41 +510,58 @@ int main(int argc, char **argv)
                g_filterIp[0] ? " filtered to " : "", g_filterIp);
 
     /* pcapng: iterate blocks: type(4) totallen(4) body(totallen-12) totallen(4) */
-    while (fread(hdr, 1, 8, f) == 8) {
+    while ((headerBytes = fread(hdr, 1, 8, f)) == 8) {
         uint32_t type  = (uint32_t)hdr[0] | hdr[1]<<8 | hdr[2]<<16 | (uint32_t)hdr[3]<<24;
         uint32_t total = rd32(hdr + 4);       /* first SHB: LE default (Windows) */
-        if (total < 12 || (total & 3u) != 0) break;
-        if (total_bytes) {
-            long position = ftell(f);
-            if (position < 0 || position > total_bytes ||
-                (uint64_t)(total - 8) >
-                (uint64_t)(total_bytes - position)) break;
+        if (total < 12 || (total & 3u) != 0) {
+            fprintf(stderr, "Invalid pcapng block length.\n"); exitCode = 1; break;
+        }
+        int64_t position = _ftelli64(f);
+        if (position < 0 || position > total_bytes ||
+            (uint64_t)(total - 8) > (uint64_t)(total_bytes - position)) {
+            fprintf(stderr, "Pcapng block extends beyond the capture file.\n"); exitCode = 1; break;
         }
 
         if (total_bytes) {                     /* live % to stderr (stdout is the CSV) */
-            int pct = (int)((uint64_t)ftell(f) * 100 / total_bytes);
+            int pct = (int)((double)position * 100 / total_bytes);
             if (pct != last_pct) { fprintf(stderr, "\rProgress: %d%%  ", pct); fflush(stderr); last_pct = pct; }
         }
 
         bodySize = total - 12;                /* excludes 8-byte header and 4-byte trailer */
         remainderSize = total - 8;            /* body plus trailing total length */
         body = (uint8_t *)malloc(remainderSize);
-        if (!body) break;
-        if (fread(body, 1, remainderSize, f) != remainderSize) { free(body); break; }
+        if (!body) {
+            fprintf(stderr, "Cannot allocate pcapng block buffer.\n"); exitCode = 1; break;
+        }
+        if (fread(body, 1, remainderSize, f) != remainderSize) {
+            fprintf(stderr, "Cannot read complete pcapng block.\n");
+            free(body); exitCode = 1; break;
+        }
         if (memcmp(body + bodySize, hdr + 4, sizeof(uint32_t)) != 0) {
             free(body);
+            fprintf(stderr, "Pcapng block length trailer does not match its header.\n");
+            exitCode = 1;
             break;
         }
 
         if (type == 0x0A0D0D0A) {             /* Section Header: byte-order magic */
-            if (bodySize < 16) { free(body); break; }
+            if (bodySize < 16) {
+                fprintf(stderr, "Truncated pcapng section header.\n");
+                free(body); exitCode = 1; break;
+            }
             if (body[0]==0x4D && body[1]==0x3C && body[2]==0x2B && body[3]==0x1A)
                 g_swap = 0;
             else if (body[0]==0x1A && body[1]==0x2B && body[2]==0x3C && body[3]==0x4D)
                 g_swap = 1;
-            else { free(body); break; }
+            else {
+                fprintf(stderr, "Invalid pcapng byte-order magic.\n");
+                free(body); exitCode = 1; break;
+            }
         } else if (type == 0x00000001) {      /* Interface Description: linktype */
-            if (bodySize < 8) { free(body); break; }
+            if (bodySize < 8) {
+                fprintf(stderr, "Truncated pcapng interface description.\n");
+                free(body); exitCode = 1; break;
+            }
             g_linktype = rd16(body);
             /* parse options for if_tsresol (code 9): linktype(2) rsv(2) snap(4) opts */
             { uint32_t o = 8;
@@ -528,8 +571,11 @@ int main(int argc, char **argv)
                   o += 4;
                   if (code == 0) break;                 /* opt_endofopt */
                   paddedLen = ((uint32_t)len + 3u) & ~3u;
-                  if (paddedLen > bodySize - o) break;
-                  if (code == 9 && len >= 1) {
+                  if (paddedLen > bodySize - o) {
+                      fprintf(stderr, "Pcapng interface option extends beyond its block.\n");
+                      exitCode = 1; break;
+                  }
+                  if (code == 9 && len >= 1 && o < bodySize) {
                       uint8_t v = body[o];
                       uint8_t e = v & 0x7F;
                       if (v & 0x80) {
@@ -544,19 +590,34 @@ int main(int argc, char **argv)
             }
         } else if (type == 0x00000006) {      /* Enhanced Packet Block */
             /* body: iface(4) tsHi(4) tsLo(4) capLen(4) origLen(4) data... */
-            if (bodySize < 20) { free(body); break; }
+            if (bodySize < 20) {
+                fprintf(stderr, "Truncated pcapng enhanced packet block.\n");
+                free(body); exitCode = 1; break;
+            }
             uint32_t capLen = rd32(body + 12);
             g_pktTicks = ((uint64_t)rd32(body + 4) << 32) | rd32(body + 8);
-            if (capLen <= bodySize - 20) handle_packet(body + 20, capLen);
+            if (capLen > bodySize - 20) {
+                fprintf(stderr, "Captured packet length exceeds its pcapng block.\n");
+                free(body); exitCode = 1; break;
+            }
+            handle_packet(body + 20, capLen);
         } else if (type == 0x00000003) {      /* Simple Packet Block: origLen(4) data */
-            if (bodySize < 4) { free(body); break; }
+            if (bodySize < 4) {
+                fprintf(stderr, "Truncated pcapng simple packet block.\n");
+                free(body); exitCode = 1; break;
+            }
             uint32_t origLen = rd32(body);
             if (origLen <= bodySize - 4) handle_packet(body + 4, origLen);
         }
         free(body);
+        if (exitCode) break;
+    }
+    if (ferror(f) || (headerBytes != 0 && headerBytes < 8)) {
+        fprintf(stderr, "Cannot read complete pcapng block header.\n"); exitCode = 1;
     }
     if (total_bytes) fprintf(stderr, "\r              \r");   /* wipe the progress line */
     reassembly_free_all();
+    free(g_map);
     fclose(f);
-    return 0;
+    return exitCode;
 }

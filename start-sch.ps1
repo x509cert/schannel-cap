@@ -31,7 +31,10 @@ pktmon reset 2>$null | Out-Null
 # ---- narrow the capture so the ETL stays small ---------------------------
 # One filter entry AND-s its conditions; without any filter, everything is
 # captured. Pin the port (and optionally both hosts) so noise never hits disk.
-pktmon filter remove 2>$null | Out-Null
+pktmon filter remove | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to clear pktmon filters (exit code $LASTEXITCODE); capture was not started."
+}
 if ($Port -or $IpA -or $IpB) {
     $fa = @('filter','add','tls-cap','-t','TCP')
     if ($Port) { $fa += @('-p',"$Port") }
@@ -39,6 +42,9 @@ if ($Port -or $IpA -or $IpB) {
     if ($IpB)  { $fa += @('-i',$IpB) }
     Write-Host "=== pktmon filter: $($fa[3..($fa.Count-1)] -join ' ')"
     & pktmon @fa | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to apply the requested pktmon filter (exit code $LASTEXITCODE); capture was not started."
+    }
 } else {
     Write-Host '=== no capture filter (capturing all traffic) -- pass -Port 8443 to shrink logs'
 }
@@ -46,12 +52,15 @@ if ($Port -or $IpA -or $IpB) {
 Write-Host '=== starting pktmon packet capture (full packets, all components) ...'
 pktmon start --capture --comp all --pkt-size 0 -f $etl 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) { pktmon start --capture --pkt-size 0 -f $etl | Out-Null }
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to start pktmon capture (exit code $LASTEXITCODE)."
+}
 
 Write-Host '=== launching ETW listener (connections.txt + schannel_failures.csv) ...'
 if ($FilterPid) {
-    Start-Process -FilePath $etw -ArgumentList @("$FilterPid") -WorkingDirectory $here
+    Start-Process -FilePath $etw -ArgumentList @("$FilterPid") -WorkingDirectory $here -ErrorAction Stop
 } else {
-    Start-Process -FilePath $etw -WorkingDirectory $here
+    Start-Process -FilePath $etw -WorkingDirectory $here -ErrorAction Stop
 }
 
 Write-Host ''

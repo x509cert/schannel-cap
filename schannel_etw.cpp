@@ -78,12 +78,11 @@ static char g_seenLines[SEEN_SLOTS][MAP_LINE_CAPACITY];
 static int seen_add(_In_z_ const char *s)
 {
     unsigned long long h = 1469598103934665603ULL;
-    size_t i; unsigned idx, probe;
     if (!s) return 0;
-    for (i = 0; s[i]; ++i) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; }
+    for (size_t i = 0; s[i]; ++i) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; }
     if (!h) h = 1;
-    idx = (unsigned)(h % SEEN_SLOTS);
-    for (probe = 0; probe < SEEN_SLOTS; ++probe) {
+    unsigned idx = (unsigned)(h % SEEN_SLOTS);
+    for (unsigned probe = 0; probe < SEEN_SLOTS; ++probe) {
         unsigned k = (idx + probe) % SEEN_SLOTS;
         if (g_seenHashes[k] == 0) {
             if (strcpy_s(g_seenLines[k], sizeof(g_seenLines[k]), s) != 0) return 1;
@@ -97,10 +96,9 @@ static int seen_add(_In_z_ const char *s)
 
 static void sanitize_token(_Inout_updates_z_(n) char *s, size_t n)
 {
-    size_t i;
     if (!s || n == 0) return;
     s[n - 1] = 0;
-    for (i = 0; s[i]; ++i) {
+    for (size_t i = 0; s[i]; ++i) {
         unsigned char c = (unsigned char)s[i];
         if (c <= 0x20 || c == 0x7f) s[i] = '_';
     }
@@ -180,8 +178,7 @@ static void poll_tcp_table(void)
             sz <= capacity &&
             t->dwNumEntries <= (sz - FIELD_OFFSET(MIB_TCPTABLE_OWNER_PID, table)) /
                                sizeof(t->table[0])) {
-            DWORD i;
-            for (i = 0; i < t->dwNumEntries; ++i) {
+            for (DWORD i = 0; i < t->dwNumEntries; ++i) {
                 MIB_TCPROW_OWNER_PID *r = &t->table[i];
                 char l[64], rem[64];
                 if (!r->dwRemotePort) continue;      /* listeners: no peer */
@@ -206,8 +203,7 @@ static void poll_tcp_table(void)
             sz <= capacity &&
             t->dwNumEntries <= (sz - FIELD_OFFSET(MIB_TCP6TABLE_OWNER_PID, table)) /
                                sizeof(t->table[0])) {
-            DWORD i;
-            for (i = 0; i < t->dwNumEntries; ++i) {
+            for (DWORD i = 0; i < t->dwNumEntries; ++i) {
                 MIB_TCP6ROW_OWNER_PID *r = &t->table[i];
                 char l[64], rem[64];
                 if (!r->dwRemotePort) continue;
@@ -256,24 +252,20 @@ static void csv_field(FILE *file, _In_z_ const char *value)
     (void)fputc('"', file);
 }
 
-static void failure_emit(_In_ const SYSTEMTIME *time, _In_ PEVENT_RECORD ev,
+static void failure_emit(_In_z_ const char *timestamp, _In_ PEVENT_RECORD ev,
                          _In_reads_(count) const KV *kv, int count)
 {
-    char timestamp[32], pid[16], process[64], eventId[16];
+    char pid[16], process[64], eventId[16];
     char details[FAILURE_DETAIL_CAPACITY] = "";
-    int i;
 
-    if (!g_failures || !time || !ev || !kv || count < 0) return;
-    if (sprintf_s(timestamp, sizeof(timestamp), "%02u:%02u:%02u.%03u",
-                  time->wHour, time->wMinute, time->wSecond,
-                  time->wMilliseconds) < 0) return;
+    if (!g_failures || !timestamp || !ev || !kv || count < 0) return;
     if (sprintf_s(pid, sizeof(pid), "%lu",
                   (unsigned long)ev->EventHeader.ProcessId) < 0) return;
     if (sprintf_s(eventId, sizeof(eventId), "%u",
                   ev->EventHeader.EventDescriptor.Id) < 0) return;
     pid_name(ev->EventHeader.ProcessId, process, sizeof(process));
 
-    for (i = 0; i < count; ++i) {
+    for (int i = 0; i < count; ++i) {
         char item[sizeof(kv[i].name) + sizeof(kv[i].val) + 4];
         if (sprintf_s(item, sizeof(item), "%s%s=%s",
                       i ? "; " : "", kv[i].name, kv[i].val) < 0) continue;
@@ -297,12 +289,11 @@ static _Ret_maybenull_ LPCWSTR info_string(
     ULONG infoSize, ULONG offset)
 {
     const WCHAR *s;
-    size_t i, count;
     if (!info || offset > infoSize || infoSize - offset < sizeof(WCHAR) ||
         offset % sizeof(WCHAR) != 0) return NULL;
     s = (const WCHAR *)((const BYTE *)info + offset);
-    count = (infoSize - offset) / sizeof(WCHAR);
-    for (i = 0; i < count; ++i) if (s[i] == L'\0') return s;
+    size_t count = (infoSize - offset) / sizeof(WCHAR);
+    for (size_t i = 0; i < count; ++i) if (s[i] == L'\0') return s;
     return NULL;
 }
 
@@ -339,7 +330,7 @@ static int decode_props(_In_ PEVENT_RECORD ev,
                         _In_reads_bytes_(infoSize) PTRACE_EVENT_INFO info,
                         ULONG infoSize, _Out_writes_to_(max, return) KV *kv, int max)
 {
-    USHORT i, pointerSize, remaining; PBYTE pData; int n = 0;
+    USHORT pointerSize, remaining; PBYTE pData; int n = 0;
     size_t propertyBytes;
     if (!ev || !info || !kv || max <= 0 ||
         info->TopLevelPropertyCount > info->PropertyCount) return 0;
@@ -352,7 +343,7 @@ static int decode_props(_In_ PEVENT_RECORD ev,
     pointerSize = (ev->EventHeader.Flags & EVENT_HEADER_FLAG_32_BIT_HEADER) ? 4 : 8;
     pData = (PBYTE)ev->UserData; remaining = ev->UserDataLength;
     if (remaining && !pData) return 0;
-    for (i = 0; i < info->TopLevelPropertyCount && n < max; ++i) {
+    for (USHORT i = 0; i < info->TopLevelPropertyCount && n < max; ++i) {
         PEVENT_PROPERTY_INFO p = &info->EventPropertyInfoArray[i];
         LPCWSTR name = info_string(info, infoSize, p->NameOffset);
         PEVENT_MAP_INFO map = NULL; DWORD mapSz = 0;
@@ -403,8 +394,9 @@ static int decode_props(_In_ PEVENT_RECORD ev,
 static void WINAPI on_event(_In_ PEVENT_RECORD ev)
 {
     PTRACE_EVENT_INFO info = NULL; DWORD sz = 0; TDHSTATUS st;
-    KV *kv = NULL; int n, i, isSchannel, isTcpip;
-    FILETIME fu, fl; SYSTEMTIME lt;
+    KV *kv = NULL; int n, isSchannel, isTcpip;
+    FILETIME fu = {}, fl = {}; SYSTEMTIME lt = {};
+    char timestamp[32] = "--:--:--.---";
     UCHAR level;
 
     if (!ev) return;
@@ -426,19 +418,22 @@ static void WINAPI on_event(_In_ PEVENT_RECORD ev)
 
     fu.dwLowDateTime = ev->EventHeader.TimeStamp.LowPart;
     fu.dwHighDateTime = ev->EventHeader.TimeStamp.HighPart;
-    FileTimeToLocalFileTime(&fu,&fl); FileTimeToSystemTime(&fl,&lt);
+    if (!FileTimeToLocalFileTime(&fu, &fl) || !FileTimeToSystemTime(&fl, &lt))
+        fprintf(stderr, "Cannot convert ETW event timestamp: %lu\n", GetLastError());
+    else
+        (void)sprintf_s(timestamp, sizeof(timestamp), "%02u:%02u:%02u.%03u",
+                        lt.wHour, lt.wMinute, lt.wSecond, lt.wMilliseconds);
     level = ev->EventHeader.EventDescriptor.Level;
     if (isSchannel && level >= TRACE_LEVEL_CRITICAL &&
         level <= TRACE_LEVEL_WARNING)
-        failure_emit(&lt, ev, kv, n);
+        failure_emit(timestamp, ev, kv, n);
 
     if (g_verbose) {
-        printf("%02u:%02u:%02u.%03u  PID=%lu  %s  event=%u level=%u\n",
-               lt.wHour,lt.wMinute,lt.wSecond,lt.wMilliseconds,
+        printf("%s  PID=%lu  %s  event=%u level=%u\n", timestamp,
                ev->EventHeader.ProcessId,
                isSchannel?"Schannel":isTcpip?"TCPIP":"?",
                ev->EventHeader.EventDescriptor.Id, level);
-        for (i=0;i<n;++i) printf("    %-22s = %s\n", kv[i].name, kv[i].val);
+        for (int i = 0; i < n; ++i) printf("    %-22s = %s\n", kv[i].name, kv[i].val);
         printf("\n");
     }
     free(kv);
@@ -528,11 +523,11 @@ int main(_In_ int argc, _In_reads_(argc) char **argv)
 {
     ULONG bufSize, rc;
     EVENT_TRACE_LOGFILEW log;
-    int a, exitCode = EXIT_FAILURE;
+    int exitCode = EXIT_FAILURE;
     BOOL lockInitialized = FALSE, handlerInstalled = FALSE;
     HANDLE hcm = NULL;
 
-    for (a = 1; a < argc; ++a) {
+    for (int a = 1; a < argc; ++a) {
         if (_stricmp(argv[a], "-v") == 0) g_verbose = 1;
         else if (_stricmp(argv[a], "-p") == 0) {
             if (a + 1 >= argc || !parse_pid(argv[++a], &g_filterPid)) {

@@ -37,12 +37,16 @@ Write-Host '=== stopping ETW listener / trace session (if running) ...'
 Stop-Process -Name schannel_etw -Force -ErrorAction SilentlyContinue
 logman stop SchannelRT_Consumer -ets 2>$null | Out-Null
 
+$captureReady = $false
 if (-not $FailuresOnly) {
     Write-Host "=== converting $etl to pcapng ..."
     pktmon pcapng $etl -o $pcap 2>$null | Out-Null
-    if (-not (Test-Path $pcap)) { pktmon etl2pcap $etl -o $pcap 2>$null | Out-Null }
-    if (-not (Test-Path $pcap)) {
-        Write-Host "[!] pcapng conversion failed; failure events can still be displayed." -ForegroundColor Red
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pcap -PathType Leaf)) {
+        pktmon etl2pcap $etl -o $pcap 2>$null | Out-Null
+    }
+    $captureReady = $LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $pcap -PathType Leaf)
+    if (-not $captureReady) {
+        Write-Warning 'Pcapng conversion failed; successful-handshake telemetry is unavailable. Failure events can still be displayed.'
     }
 }
 
@@ -56,12 +60,21 @@ if ($FailuresOnly) {
 }
 
 $successRows = @()
-if (-not $FailuresOnly -and (Test-Path $pcap)) {
+$successAvailable = $false
+if ($captureReady -and -not (Test-Path -LiteralPath $decode -PathType Leaf)) {
+    Write-Warning 'tls_group.exe not found; successful-handshake telemetry is unavailable. Run build.cmd first.'
+} elseif ($captureReady) {
     Write-Host 'Decoding capture (progress below; large captures take a moment)...'
     $da = @($pcap, $connections)
     if ($FilterIp) { $da += $FilterIp }
     $da += '-csv'
-    $successRows = @(& $decode @da | ConvertFrom-Csv)
+    $decoded = @(& $decode @da)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "TLS decoder failed (exit code $LASTEXITCODE); successful-handshake telemetry is unavailable. Failure events can still be displayed."
+    } else {
+        $successRows = @($decoded | ConvertFrom-Csv)
+        $successAvailable = $true
+    }
 
     # collapse duplicates from multi-point capture (same connection + params),
     # then order chronologically
@@ -107,6 +120,8 @@ $rows = @($rows | Sort-Object Time)
 if (-not $rows) {
     $message = if ($FailuresOnly) {
         '(no Schannel warning, error, or critical events captured)'
+    } elseif (-not $successAvailable) {
+        '(successful-handshake telemetry unavailable; no Schannel warning, error, or critical events captured)'
     } else {
         '(no TLS successes or failures captured)'
     }
@@ -271,6 +286,8 @@ if (-not $rows) {
 }
 
 Write-Host ''
-if (Test-Path $pcap) {
+if ($captureReady) {
     Write-Host "Full capture: $pcap  (open in Wireshark for detail)."
+} elseif (Test-Path -LiteralPath $pcap -PathType Leaf) {
+    Write-Host "Existing capture (not converted or decoded this run): $pcap"
 }

@@ -107,6 +107,16 @@ build.cmd /analyze
 
 Produces `schannel_etw.exe` and `tls_group.exe` in this folder.
 
+Regression checks (no capture or administrator rights required):
+
+```powershell
+python tests\test_tls_group.py
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\test_capture_scripts.ps1
+```
+
+The decoder checks use Python 3's standard library and the built executable;
+the script checks mock packet capture and process commands.
+
 ---
 
 ## Run
@@ -151,6 +161,17 @@ full — a post-quantum or hybrid ServerHello's `key_share` can exceed one TCP
 segment, so `tls_group` performs bounded sequence-aware reassembly. Truncating
 packets would still lose the group; the size win comes from dropping
 non-matching connections, not from shortening packets.
+
+If pktmon cannot clear or apply capture filters, `start-sch.ps1` stops rather
+than starting a capture with unintended filters. Running without filter
+arguments still intentionally captures all traffic.
+
+If capture conversion or TLS decoding fails, `stop-sch.ps1` reports successful
+handshake telemetry as unavailable; it does not substitute an older pcapng or
+accept partial output from a failed decoder. Schannel failure events remain
+available. Malformed pcapng blocks produce an error and a nonzero decoder exit
+code. Invalid timestamps are reported on stderr and displayed as
+`--:--:--.---`, without discarding otherwise decodable handshake or event data.
 
 If the server transfers large response bodies and the ETL is still big after
 port-filtering, capture only the handshake window: run `stop-sch.ps1` a second
