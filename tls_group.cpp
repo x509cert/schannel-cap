@@ -32,14 +32,15 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include "heap_ptr.h"
 
 static int g_swap = 0;                    /* pcapng section byte-order */
 static uint16_t g_linktype = 1;           /* from first IDB (1 = Ethernet) */
 static uint64_t g_tsDenom = 1000000;      /* pcapng ticks/sec (if_tsresol; default us) */
 static uint64_t g_pktTicks = 0;           /* current packet timestamp (ticks) */
 
-#define MAX_REASSEMBLY_FLOWS 256
-#define MAX_TLS_RECORD_BYTES (5u + UINT16_MAX)
+static constexpr int MAX_REASSEMBLY_FLOWS = 256;
+static constexpr unsigned int MAX_TLS_RECORD_BYTES = 5u + UINT16_MAX;
 
 typedef struct {
     int active;
@@ -79,7 +80,7 @@ static unsigned fraction_milliseconds(uint64_t remainder, uint64_t denominator)
 /* format the current packet's pcapng timestamp as local HH:MM:SS.mmm */
 static void fmt_time(char *out, size_t n)
 {
-    const uint64_t epoch = 116444736000000000ULL;
+    constexpr uint64_t epoch = 116444736000000000ULL;
     uint64_t sec, fraction;
     ULARGE_INTEGER u;
     FILETIME ft = {}, lf = {}; SYSTEMTIME st = {};
@@ -153,7 +154,7 @@ static int g_csv = 0;   /* -csv: emit CSV for the PowerShell table */
 
 /* ---- optional 4-tuple -> PID/name map loaded from connections.txt -------- */
 typedef struct { char local[64]; char remote[64]; unsigned long pid; char proc[64]; } MapEnt;
-static MapEnt *g_map = NULL;
+static MapEnt *g_map = nullptr;
 static int     g_mapN = 0, g_mapCap = 0;
 static char    g_filterIp[64] = "";     /* if set, only lines involving this IP */
 
@@ -314,12 +315,12 @@ static ReassemblyFlow *reassembly_find(const char *src, const char *dst)
         if (flow->active && strcmp(flow->src, src) == 0 &&
             strcmp(flow->dst, dst) == 0) return flow;
     }
-    return NULL;
+    return nullptr;
 }
 
-static ReassemblyFlow *reassembly_acquire(const char *src, const char *dst)
+[[nodiscard]] static ReassemblyFlow *reassembly_acquire(const char *src, const char *dst)
 {
-    ReassemblyFlow *slot = NULL;
+    ReassemblyFlow *slot = nullptr;
     for (int i = 0; i < MAX_REASSEMBLY_FLOWS; ++i) {
         ReassemblyFlow *flow = &g_reassembly[i];
         if (!flow->active) {
@@ -328,12 +329,12 @@ static ReassemblyFlow *reassembly_acquire(const char *src, const char *dst)
         }
         if (!slot || flow->age < slot->age) slot = flow;
     }
-    if (!slot) return NULL;
+    if (!slot) return nullptr;
     reassembly_clear(slot);
     if (strcpy_s(slot->src, sizeof(slot->src), src) != 0 ||
         strcpy_s(slot->dst, sizeof(slot->dst), dst) != 0) {
         reassembly_clear(slot);
-        return NULL;
+        return nullptr;
     }
     slot->active = 1;
     slot->age = ++g_reassemblyAge;
@@ -370,7 +371,7 @@ static void process_tcp_payload(uint32_t seq, const uint8_t *p, uint32_t len,
         uint32_t overlap = 0, available, needed, take;
         if (delta > 0) {
             reassembly_clear(flow);
-            flow = NULL;
+            flow = nullptr;
         } else {
             if (delta < 0) overlap = flow->nextSeq - seq;
             if (overlap >= len) {
@@ -474,8 +475,7 @@ int main(int argc, char **argv)
     FILE *f;
     uint8_t hdr[12];
     uint32_t bodySize, remainderSize;
-    uint8_t *body;
-    const char *argv0_pcap = NULL;
+    const char *argv0_pcap = nullptr;
     int64_t total_bytes;
     size_t headerBytes;
     int exitCode = 0;
@@ -529,16 +529,16 @@ int main(int argc, char **argv)
 
         bodySize = total - 12;                /* excludes 8-byte header and 4-byte trailer */
         remainderSize = total - 8;            /* body plus trailing total length */
-        body = (uint8_t *)malloc(remainderSize);
+        HeapPtr<uint8_t[]> bodyOwner(static_cast<uint8_t *>(malloc(remainderSize)));
+        uint8_t *body = bodyOwner.get();
         if (!body) {
             fprintf(stderr, "Cannot allocate pcapng block buffer.\n"); exitCode = 1; break;
         }
         if (fread(body, 1, remainderSize, f) != remainderSize) {
             fprintf(stderr, "Cannot read complete pcapng block.\n");
-            free(body); exitCode = 1; break;
+            exitCode = 1; break;
         }
         if (memcmp(body + bodySize, hdr + 4, sizeof(uint32_t)) != 0) {
-            free(body);
             fprintf(stderr, "Pcapng block length trailer does not match its header.\n");
             exitCode = 1;
             break;
@@ -547,7 +547,7 @@ int main(int argc, char **argv)
         if (type == 0x0A0D0D0A) {             /* Section Header: byte-order magic */
             if (bodySize < 16) {
                 fprintf(stderr, "Truncated pcapng section header.\n");
-                free(body); exitCode = 1; break;
+                exitCode = 1; break;
             }
             if (body[0]==0x4D && body[1]==0x3C && body[2]==0x2B && body[3]==0x1A)
                 g_swap = 0;
@@ -555,12 +555,12 @@ int main(int argc, char **argv)
                 g_swap = 1;
             else {
                 fprintf(stderr, "Invalid pcapng byte-order magic.\n");
-                free(body); exitCode = 1; break;
+                exitCode = 1; break;
             }
         } else if (type == 0x00000001) {      /* Interface Description: linktype */
             if (bodySize < 8) {
                 fprintf(stderr, "Truncated pcapng interface description.\n");
-                free(body); exitCode = 1; break;
+                exitCode = 1; break;
             }
             g_linktype = rd16(body);
             /* parse options for if_tsresol (code 9): linktype(2) rsv(2) snap(4) opts */
@@ -592,24 +592,23 @@ int main(int argc, char **argv)
             /* body: iface(4) tsHi(4) tsLo(4) capLen(4) origLen(4) data... */
             if (bodySize < 20) {
                 fprintf(stderr, "Truncated pcapng enhanced packet block.\n");
-                free(body); exitCode = 1; break;
+                exitCode = 1; break;
             }
             uint32_t capLen = rd32(body + 12);
             g_pktTicks = ((uint64_t)rd32(body + 4) << 32) | rd32(body + 8);
             if (capLen > bodySize - 20) {
                 fprintf(stderr, "Captured packet length exceeds its pcapng block.\n");
-                free(body); exitCode = 1; break;
+                exitCode = 1; break;
             }
             handle_packet(body + 20, capLen);
         } else if (type == 0x00000003) {      /* Simple Packet Block: origLen(4) data */
             if (bodySize < 4) {
                 fprintf(stderr, "Truncated pcapng simple packet block.\n");
-                free(body); exitCode = 1; break;
+                exitCode = 1; break;
             }
             uint32_t origLen = rd32(body);
             if (origLen <= bodySize - 4) handle_packet(body + 4, origLen);
         }
-        free(body);
         if (exitCode) break;
     }
     if (ferror(f) || (headerBytes != 0 && headerBytes < 8)) {

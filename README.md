@@ -66,6 +66,7 @@ captured on this machine class — drive the handshake from another host (see
 |------|------------|
 | `schannel_etw.cpp` | C++ ETW listener. Continuously snapshots the TCP table into `connections.txt` for the PID join and writes Schannel warning/error/critical events to `schannel_failures.csv`. `-v` also dumps raw Schannel/TCPIP events (self-describing via TDH). |
 | `tls_group.cpp` | C++ pcapng parser that pulls the negotiated cipher + group out of each ServerHello and attaches the owning PID from `connections.txt`. |
+| `heap_ptr.h` | Shared RAII owner for local C-heap buffers, using `std::unique_ptr` with a `free` deleter. |
 | `build.cmd` | Builds `schannel_etw.exe` and `tls_group.exe`. |
 | `start-sch.ps1` | Starts pktmon capture + the ETW listener. Requires an elevated PowerShell window. |
 | `stop-sch.ps1` | Stops capture, converts ETL→pcapng, and prints the correlated result. Requires an elevated PowerShell window. |
@@ -107,6 +108,11 @@ build.cmd /analyze
 
 Produces `schannel_etw.exe` and `tls_group.exe` in this folder.
 
+Local C-heap buffers use RAII without changing `malloc`/`calloc` failure behavior.
+Buffers resized with `realloc` and shared capture/session resources retain their
+explicit lifetime management. Numeric limits use typed `constexpr` constants,
+pointer nulls use `nullptr`, and must-check helpers use `[[nodiscard]]`.
+
 Regression checks (no capture or administrator rights required):
 
 ```powershell
@@ -116,6 +122,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\test_capture_scripts.p
 
 The decoder checks use Python 3's standard library and the built executable;
 the script checks mock packet capture and process commands.
+
+From a VS Native Tools prompt, the native checks verify buffer ownership,
+constant types, and ETW helper behavior without starting capture:
+
+```powershell
+cl /nologo /W4 /std:c++20 /EHsc /MTd /D_CRT_SECURE_NO_WARNINGS tests\test_cpp_safety.cpp /Fe:tests\test_etw_safety.exe
+.\tests\test_etw_safety.exe
+cl /nologo /W4 /std:c++20 /EHsc /MTd /D_CRT_SECURE_NO_WARNINGS /DTEST_TLS_GROUP tests\test_cpp_safety.cpp /Fe:tests\test_tls_safety.exe
+.\tests\test_tls_safety.exe
+```
 
 ---
 

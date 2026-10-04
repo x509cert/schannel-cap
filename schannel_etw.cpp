@@ -42,15 +42,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "heap_ptr.h"
 
 #pragma comment(lib, "tdh.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 
-#define SESSION_NAME_CAPACITY 64
-#define MAX_TDH_ALLOCATION (16UL * 1024UL * 1024UL)
-#define MAX_TCP_TABLE_ALLOCATION (64UL * 1024UL * 1024UL)
+static constexpr int SESSION_NAME_CAPACITY = 64;
+static constexpr unsigned long MAX_TDH_ALLOCATION = 16UL * 1024UL * 1024UL;
+static constexpr unsigned long MAX_TCP_TABLE_ALLOCATION = 64UL * 1024UL * 1024UL;
 
 static const GUID SchannelGuid =
     { 0x1F678132,0x5938,0x4686,{0x9F,0xDC,0xC8,0xFF,0x68,0xF1,0x5C,0x85} };
@@ -59,7 +60,7 @@ static const GUID TcpipGuid =
 
 static TRACEHANDLE             g_session = 0;
 static TRACEHANDLE             g_trace   = (TRACEHANDLE)INVALID_HANDLE_VALUE;
-static PEVENT_TRACE_PROPERTIES g_props   = NULL;
+static PEVENT_TRACE_PROPERTIES g_props   = nullptr;
 static WCHAR                   g_sessionName[SESSION_NAME_CAPACITY];
 static int                     g_verbose = 0;
 static DWORD                   g_filterPid = 0;
@@ -67,11 +68,11 @@ static volatile LONG           g_running = 1;
 static volatile LONG           g_sessionStarted = 0;
 
 /* ---- connection map (connections.txt) writer ---------------------------- */
-static FILE            *g_map = NULL;
-static FILE            *g_failures = NULL;
+static FILE            *g_map = nullptr;
+static FILE            *g_failures = nullptr;
 static CRITICAL_SECTION g_mapLock;
-#define SEEN_SLOTS 32768
-#define MAP_LINE_CAPACITY 224
+static constexpr int SEEN_SLOTS = 32768;
+static constexpr int MAP_LINE_CAPACITY = 224;
 static unsigned long long g_seenHashes[SEEN_SLOTS];
 static char g_seenLines[SEEN_SLOTS][MAP_LINE_CAPACITY];
 
@@ -137,7 +138,7 @@ static void map_emit(_In_z_ const char *local, _In_z_ const char *remote, DWORD 
     if (g_map && seen_add(line) &&
         (fprintf(g_map, "%s\n", line) < 0 || fflush(g_map) != 0)) {
         (void)fclose(g_map);
-        g_map = NULL;
+        g_map = nullptr;
     }
     LeaveCriticalSection(&g_mapLock);
 }
@@ -166,14 +167,13 @@ static void poll_tcp_table(void)
 {
     DWORD sz = sizeof(MIB_TCPTABLE_OWNER_PID), capacity;
     /* IPv4 */
-    if (GetExtendedTcpTable(NULL, &sz, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0)
+    if (GetExtendedTcpTable(nullptr, &sz, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0)
             == ERROR_INSUFFICIENT_BUFFER &&
         sz >= (DWORD)FIELD_OFFSET(MIB_TCPTABLE_OWNER_PID, table) &&
         sz <= MAX_TCP_TABLE_ALLOCATION) {
-        PMIB_TCPTABLE_OWNER_PID t;
         capacity = sz;
-        t = (PMIB_TCPTABLE_OWNER_PID)calloc(1, capacity);
-        if (t && GetExtendedTcpTable(t, &sz, FALSE, AF_INET,
+        HeapPtr<MIB_TCPTABLE_OWNER_PID> t(static_cast<PMIB_TCPTABLE_OWNER_PID>(calloc(1, capacity)));
+        if (t && GetExtendedTcpTable(t.get(), &sz, FALSE, AF_INET,
                                     TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR &&
             sz <= capacity &&
             t->dwNumEntries <= (sz - FIELD_OFFSET(MIB_TCPTABLE_OWNER_PID, table)) /
@@ -187,18 +187,16 @@ static void poll_tcp_table(void)
                 map_emit(l, rem, r->dwOwningPid);
             }
         }
-        free(t);
     }
     /* IPv6 */
     sz = sizeof(MIB_TCP6TABLE_OWNER_PID);
-    if (GetExtendedTcpTable(NULL, &sz, FALSE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0)
+    if (GetExtendedTcpTable(nullptr, &sz, FALSE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0)
             == ERROR_INSUFFICIENT_BUFFER &&
         sz >= (DWORD)FIELD_OFFSET(MIB_TCP6TABLE_OWNER_PID, table) &&
         sz <= MAX_TCP_TABLE_ALLOCATION) {
-        PMIB_TCP6TABLE_OWNER_PID t;
         capacity = sz;
-        t = (PMIB_TCP6TABLE_OWNER_PID)calloc(1, capacity);
-        if (t && GetExtendedTcpTable(t, &sz, FALSE, AF_INET6,
+        HeapPtr<MIB_TCP6TABLE_OWNER_PID> t(static_cast<PMIB_TCP6TABLE_OWNER_PID>(calloc(1, capacity)));
+        if (t && GetExtendedTcpTable(t.get(), &sz, FALSE, AF_INET6,
                                     TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR &&
             sz <= capacity &&
             t->dwNumEntries <= (sz - FIELD_OFFSET(MIB_TCP6TABLE_OWNER_PID, table)) /
@@ -212,7 +210,6 @@ static void poll_tcp_table(void)
                 map_emit(l, rem, r->dwOwningPid);
             }
         }
-        free(t);
     }
 }
 
@@ -228,8 +225,8 @@ static DWORD WINAPI conmap_thread(_In_opt_ LPVOID p)
 
 /* ---- TDH property decode ------------------------------------------------ */
 typedef struct { char name[64]; char val[256]; USHORT outType; } KV;
-#define MAX_KV 64
-#define FAILURE_DETAIL_CAPACITY 4096
+static constexpr int MAX_KV = 64;
+static constexpr int FAILURE_DETAIL_CAPACITY = 4096;
 
 static const char *level_name(UCHAR level)
 {
@@ -284,21 +281,21 @@ static void failure_emit(_In_z_ const char *timestamp, _In_ PEVENT_RECORD ev,
     (void)fflush(g_failures);
 }
 
-static _Ret_maybenull_ LPCWSTR info_string(
+[[nodiscard]] static _Ret_maybenull_ LPCWSTR info_string(
     _In_reads_bytes_(infoSize) const TRACE_EVENT_INFO *info,
     ULONG infoSize, ULONG offset)
 {
     const WCHAR *s;
     if (!info || offset > infoSize || infoSize - offset < sizeof(WCHAR) ||
-        offset % sizeof(WCHAR) != 0) return NULL;
+        offset % sizeof(WCHAR) != 0) return nullptr;
     s = (const WCHAR *)((const BYTE *)info + offset);
     size_t count = (infoSize - offset) / sizeof(WCHAR);
     for (size_t i = 0; i < count; ++i) if (s[i] == L'\0') return s;
-    return NULL;
+    return nullptr;
 }
 
 _Success_(return != FALSE)
-static BOOL prop_length(_In_ PEVENT_RECORD ev,
+[[nodiscard]] static BOOL prop_length(_In_ PEVENT_RECORD ev,
                         _In_reads_bytes_(infoSize) PTRACE_EVENT_INFO info,
                         ULONG infoSize, USHORT i, _Out_ USHORT *length)
 {
@@ -317,7 +314,7 @@ static BOOL prop_length(_In_ PEVENT_RECORD ev,
         ZeroMemory(&d, sizeof(d));
         d.PropertyName = (ULONGLONG)(ULONG_PTR)name;
         d.ArrayIndex = ULONG_MAX;
-        if (TdhGetProperty(ev, 0, NULL, 1, &d, sizeof(val), (PBYTE)&val) != ERROR_SUCCESS ||
+        if (TdhGetProperty(ev, 0, nullptr, 1, &d, sizeof(val), (PBYTE)&val) != ERROR_SUCCESS ||
             val > USHRT_MAX) return FALSE;
         *length = (USHORT)val;
         return TRUE;
@@ -326,7 +323,7 @@ static BOOL prop_length(_In_ PEVENT_RECORD ev,
     return TRUE;
 }
 
-static int decode_props(_In_ PEVENT_RECORD ev,
+[[nodiscard]] static int decode_props(_In_ PEVENT_RECORD ev,
                         _In_reads_bytes_(infoSize) PTRACE_EVENT_INFO info,
                         ULONG infoSize, _Out_writes_to_(max, return) KV *kv, int max)
 {
@@ -346,45 +343,45 @@ static int decode_props(_In_ PEVENT_RECORD ev,
     for (USHORT i = 0; i < info->TopLevelPropertyCount && n < max; ++i) {
         PEVENT_PROPERTY_INFO p = &info->EventPropertyInfoArray[i];
         LPCWSTR name = info_string(info, infoSize, p->NameOffset);
-        PEVENT_MAP_INFO map = NULL; DWORD mapSz = 0;
+        HeapPtr<EVENT_MAP_INFO> map = nullptr; DWORD mapSz = 0;
         USHORT plen, consumed = 0; ULONG bufBytes = 512; PWCHAR buf; TDHSTATUS fs;
         if (p->Flags & PropertyStruct) continue;
         if (!name) break;
         if (p->nonStructType.MapNameOffset) {
             LPCWSTR mn = info_string(info, infoSize, p->nonStructType.MapNameOffset);
             if (!mn) break;
-            if (TdhGetEventMapInformation(ev, (PWSTR)mn, map, &mapSz) == ERROR_INSUFFICIENT_BUFFER) {
+            if (TdhGetEventMapInformation(ev, (PWSTR)mn, map.get(), &mapSz) == ERROR_INSUFFICIENT_BUFFER) {
                 if (!mapSz || mapSz > MAX_TDH_ALLOCATION) break;
-                map = (PEVENT_MAP_INFO)calloc(1, mapSz);
-                if (map && TdhGetEventMapInformation(ev, (PWSTR)mn, map, &mapSz) != ERROR_SUCCESS) { free(map); map = NULL; }
+                map.reset(static_cast<PEVENT_MAP_INFO>(calloc(1, mapSz)));
+                if (map && TdhGetEventMapInformation(ev, (PWSTR)mn, map.get(), &mapSz) != ERROR_SUCCESS) map = nullptr;
             }
         }
-        if (!prop_length(ev, info, infoSize, i, &plen)) { free(map); break; }
+        if (!prop_length(ev, info, infoSize, i, &plen)) break;
         buf = (PWCHAR)calloc(1, bufBytes);
-        if (!buf) { free(map); break; }
-        fs = TdhFormatProperty(info, map, pointerSize, p->nonStructType.InType,
+        if (!buf) break;
+        fs = TdhFormatProperty(info, map.get(), pointerSize, p->nonStructType.InType,
                                p->nonStructType.OutType, plen, remaining, pData, &bufBytes, buf, &consumed);
         if (fs == ERROR_INSUFFICIENT_BUFFER && bufBytes && bufBytes <= MAX_TDH_ALLOCATION) {
             PWCHAR nb = (PWCHAR)realloc(buf, bufBytes);
             if (nb) { buf = nb;
                 ZeroMemory(buf, bufBytes);
-                fs = TdhFormatProperty(info, map, pointerSize, p->nonStructType.InType,
+                fs = TdhFormatProperty(info, map.get(), pointerSize, p->nonStructType.InType,
                                        p->nonStructType.OutType, plen, remaining, pData, &bufBytes, buf, &consumed); }
         }
         if (fs == ERROR_SUCCESS && consumed <= remaining) {
             kv[n].name[0] = 0; kv[n].val[0] = 0;
             if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, name, -1,
-                                     kv[n].name, sizeof(kv[n].name), NULL, NULL))
+                                     kv[n].name, sizeof(kv[n].name), nullptr, nullptr))
                 (void)strcpy_s(kv[n].name, sizeof(kv[n].name), "?");
             if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, buf, -1,
-                                     kv[n].val, sizeof(kv[n].val), NULL, NULL))
+                                     kv[n].val, sizeof(kv[n].val), nullptr, nullptr))
                 (void)strcpy_s(kv[n].val, sizeof(kv[n].val), "?");
             sanitize_token(kv[n].name, sizeof(kv[n].name));
             sanitize_token(kv[n].val, sizeof(kv[n].val));
             kv[n].outType = p->nonStructType.OutType; ++n;
             pData += consumed; remaining -= consumed;
-        } else { free(buf); free(map); break; }
-        free(buf); free(map);
+        } else { free(buf); break; }
+        free(buf);
     }
     return n;
 }
@@ -393,8 +390,8 @@ static int decode_props(_In_ PEVENT_RECORD ev,
    only serves the -v diagnostic dump. */
 static void WINAPI on_event(_In_ PEVENT_RECORD ev)
 {
-    PTRACE_EVENT_INFO info = NULL; DWORD sz = 0; TDHSTATUS st;
-    KV *kv = NULL; int n, isSchannel, isTcpip;
+    HeapPtr<TRACE_EVENT_INFO> info = nullptr; DWORD sz = 0; TDHSTATUS st;
+    HeapPtr<KV[]> kv = nullptr; int n, isSchannel, isTcpip;
     FILETIME fu = {}, fl = {}; SYSTEMTIME lt = {};
     char timestamp[32] = "--:--:--.---";
     UCHAR level;
@@ -405,16 +402,16 @@ static void WINAPI on_event(_In_ PEVENT_RECORD ev)
     isTcpip    = IsEqualGUID(ev->EventHeader.ProviderId, TcpipGuid);
     if (!g_verbose && !isSchannel) return;
 
-    st = TdhGetEventInformation(ev, 0, NULL, info, &sz);
+    st = TdhGetEventInformation(ev, 0, nullptr, info.get(), &sz);
     if (st == ERROR_INSUFFICIENT_BUFFER &&
         sz >= sizeof(TRACE_EVENT_INFO) && sz <= MAX_TDH_ALLOCATION) {
-        info = (PTRACE_EVENT_INFO)calloc(1, sz);
-        st = info ? TdhGetEventInformation(ev, 0, NULL, info, &sz) : ERROR_OUTOFMEMORY;
+        info.reset(static_cast<PTRACE_EVENT_INFO>(calloc(1, sz)));
+        st = info ? TdhGetEventInformation(ev, 0, nullptr, info.get(), &sz) : ERROR_OUTOFMEMORY;
     }
-    if (st != ERROR_SUCCESS || !info) { free(info); return; }
-    kv = (KV *)calloc(MAX_KV, sizeof(*kv));
-    if (!kv) { free(info); return; }
-    n = decode_props(ev, info, sz, kv, MAX_KV);
+    if (st != ERROR_SUCCESS || !info) return;
+    kv.reset(static_cast<KV *>(calloc(MAX_KV, sizeof(KV))));
+    if (!kv) return;
+    n = decode_props(ev, info.get(), sz, kv.get(), MAX_KV);
 
     fu.dwLowDateTime = ev->EventHeader.TimeStamp.LowPart;
     fu.dwHighDateTime = ev->EventHeader.TimeStamp.HighPart;
@@ -426,7 +423,7 @@ static void WINAPI on_event(_In_ PEVENT_RECORD ev)
     level = ev->EventHeader.EventDescriptor.Level;
     if (isSchannel && level >= TRACE_LEVEL_CRITICAL &&
         level <= TRACE_LEVEL_WARNING)
-        failure_emit(timestamp, ev, kv, n);
+        failure_emit(timestamp, ev, kv.get(), n);
 
     if (g_verbose) {
         printf("%s  PID=%lu  %s  event=%u level=%u\n", timestamp,
@@ -436,8 +433,6 @@ static void WINAPI on_event(_In_ PEVENT_RECORD ev)
         for (int i = 0; i < n; ++i) printf("    %-22s = %s\n", kv[i].name, kv[i].val);
         printf("\n");
     }
-    free(kv);
-    free(info);
 }
 
 static BOOL WINAPI ctrl_handler(DWORD type)
@@ -459,7 +454,7 @@ static BOOL WINAPI ctrl_handler(DWORD type)
 }
 
 _Success_(return != FALSE)
-static BOOL parse_pid(_In_z_ const char *text, _Out_ DWORD *pid)
+[[nodiscard]] static BOOL parse_pid(_In_z_ const char *text, _Out_ DWORD *pid)
 {
     char *end;
     unsigned long value;
@@ -467,7 +462,7 @@ static BOOL parse_pid(_In_z_ const char *text, _Out_ DWORD *pid)
     *pid = 0;
     if (!text || !*text) return FALSE;
     errno = 0;
-    end = NULL;
+    end = nullptr;
     value = strtoul(text, &end, 10);
     if (errno == ERANGE || end == text || !end || *end || value == 0 ||
         value > MAXDWORD) return FALSE;
@@ -475,46 +470,45 @@ static BOOL parse_pid(_In_z_ const char *text, _Out_ DWORD *pid)
     return TRUE;
 }
 
-static _Ret_maybenull_ FILE *open_output_file(_In_z_ const WCHAR *fileName)
+[[nodiscard]] static _Ret_maybenull_ FILE *open_output_file(_In_z_ const WCHAR *fileName)
 {
-    const size_t pathCapacity = 32768;
-    WCHAR *path, *slash;
+    constexpr size_t pathCapacity = 32768;
+    WCHAR *slash;
     DWORD length;
     HANDLE file;
     int descriptor;
-    FILE *stream = NULL;
+    FILE *stream = nullptr;
 
-    if (!fileName) return NULL;
-    path = (WCHAR *)calloc(pathCapacity, sizeof(*path));
+    if (!fileName) return nullptr;
+    HeapPtr<WCHAR[]> path(static_cast<WCHAR *>(calloc(pathCapacity, sizeof(WCHAR))));
     if (!path) {
         SetLastError(ERROR_OUTOFMEMORY);
-        return NULL;
+        return nullptr;
     }
-    length = GetModuleFileNameW(NULL, path, (DWORD)pathCapacity);
-    if (!length || length >= pathCapacity) { free(path); return NULL; }
+    length = GetModuleFileNameW(nullptr, path.get(), (DWORD)pathCapacity);
+    if (!length || length >= pathCapacity) return nullptr;
     path[length] = L'\0';
-    slash = wcsrchr(path, L'\\');
+    slash = wcsrchr(path.get(), L'\\');
     if (!slash || FAILED(StringCchCopyW(slash + 1,
-        pathCapacity - (size_t)(slash + 1 - path), fileName))) {
-        free(path);
-        return NULL;
+        pathCapacity - (size_t)(slash + 1 - path.get()), fileName))) {
+        return nullptr;
     }
 
-    file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
-                       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    file = CreateFileW(path.get(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         DWORD error = GetLastError();
-        free(path);
+        path.reset();
         SetLastError(error);
-        return NULL;
+        return nullptr;
     }
-    free(path);
+    path.reset();
     descriptor = _open_osfhandle((intptr_t)file, _O_TEXT);
-    if (descriptor == -1) { (void)CloseHandle(file); return NULL; }
+    if (descriptor == -1) { (void)CloseHandle(file); return nullptr; }
     stream = _fdopen(descriptor, "w");
     if (!stream) {
         (void)_close(descriptor);
-        return NULL;
+        return nullptr;
     }
     return stream;
 }
@@ -525,7 +519,7 @@ int main(_In_ int argc, _In_reads_(argc) char **argv)
     EVENT_TRACE_LOGFILEW log;
     int exitCode = EXIT_FAILURE;
     BOOL lockInitialized = FALSE, handlerInstalled = FALSE;
-    HANDLE hcm = NULL;
+    HANDLE hcm = nullptr;
 
     for (int a = 1; a < argc; ++a) {
         if (_stricmp(argv[a], "-v") == 0) g_verbose = 1;
@@ -563,7 +557,7 @@ int main(_In_ int argc, _In_reads_(argc) char **argv)
     }
     (void)fprintf(g_failures, "Time,PID,Process,EventId,Level,Error\n");
     (void)fflush(g_failures);
-    hcm = CreateThread(NULL, 0, conmap_thread, NULL, 0, NULL);
+    hcm = CreateThread(nullptr, 0, conmap_thread, nullptr, 0, nullptr);
     if (!hcm) {
         fprintf(stderr, "CreateThread failed: %lu\n", (unsigned long)GetLastError());
         goto cleanup;
@@ -586,10 +580,10 @@ int main(_In_ int argc, _In_reads_(argc) char **argv)
     }
     InterlockedExchange(&g_sessionStarted, 1);
     rc = EnableTraceEx2(g_session, &SchannelGuid, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                        TRACE_LEVEL_VERBOSE, 0, 0, 0, NULL);
+                        TRACE_LEVEL_VERBOSE, 0, 0, 0, nullptr);
     if (rc != ERROR_SUCCESS) { fprintf(stderr, "Enable Schannel failed: %lu\n", rc); goto cleanup; }
     rc = EnableTraceEx2(g_session, &TcpipGuid, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                        TRACE_LEVEL_INFORMATION, 0, 0, 0, NULL);
+                        TRACE_LEVEL_INFORMATION, 0, 0, 0, nullptr);
     if (rc != ERROR_SUCCESS) { fprintf(stderr, "Enable TCPIP failed: %lu\n", rc); goto cleanup; }
 
     if (!SetConsoleCtrlHandler(ctrl_handler, TRUE)) {
@@ -615,7 +609,7 @@ int main(_In_ int argc, _In_reads_(argc) char **argv)
         printf("Listening for Schannel events (capturing connections and failures)...\n"
                "Leave this open. When done, run stop-sch.ps1 in the parent window (it stops this), or press Ctrl+C here.\n");
 
-    rc = ProcessTrace(&g_trace, 1, NULL, NULL);
+    rc = ProcessTrace(&g_trace, 1, nullptr, nullptr);
     if (rc != ERROR_SUCCESS && rc != ERROR_CANCELLED &&
         rc != ERROR_CTX_CLOSE_PENDING) fprintf(stderr, "ProcessTrace: %lu\n", rc);
     else exitCode = EXIT_SUCCESS;
@@ -633,9 +627,9 @@ cleanup:
         (void)WaitForSingleObject(hcm, INFINITE);
         (void)CloseHandle(hcm);
     }
-    if (g_map) { (void)fclose(g_map); g_map = NULL; }
-    if (g_failures) { (void)fclose(g_failures); g_failures = NULL; }
-    free(g_props); g_props = NULL;
+    if (g_map) { (void)fclose(g_map); g_map = nullptr; }
+    if (g_failures) { (void)fclose(g_failures); g_failures = nullptr; }
+    free(g_props); g_props = nullptr;
     if (lockInitialized) DeleteCriticalSection(&g_mapLock);
     return exitCode;
 }
