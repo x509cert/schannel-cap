@@ -1,18 +1,33 @@
 #Requires -RunAsAdministrator
 
 <#
-  stop-sch.ps1 [-FilterIp <ip>] [-FailuresOnly] [-MaskS] [-MaskD] [-ShortIPv6]
-    [-RedactStrings <string[]>]
-    -- end capture and decode the negotiated group
-    * stops pktmon and the ETW listener
-    * converts the ETL to pcapng and runs tls_group.exe
-    * optional -FilterIp: only show handshakes involving that IP (either end)
-    * optional -FailuresOnly: show only Schannel warning/error/critical events
-    * optional -MaskS/-MaskD: mask source/destination IPv4 octets 2 and 3
-    * optional -ShortIPv6: abbreviate IPv6 endpoints to first/last two groups
-    * optional -RedactStrings: omit table rows containing any supplied string
-  Run from an elevated PowerShell window:
-    powershell -ExecutionPolicy Bypass -File stop-sch.ps1
+.SYNOPSIS
+    Stop the TLS capture and show a colored table of TLS results.
+
+.DESCRIPTION
+    Stops pktmon and the ETW listener, converts tls.etl to tls.pcapng, decodes
+    it with tls_group.exe, and shows successful handshakes plus Schannel
+    failures. Run from an elevated PowerShell window.
+
+    Options:
+      -FilterIp <ip>             Only show successful handshakes involving this
+                                 IP (either endpoint).
+      -FailuresOnly              Only show Schannel warning, error, and critical
+                                 events; skips pcapng conversion and decoding.
+      -Resolve                   Replace IPs with reverse-DNS names (slow).
+      -MaskS                     Mask source IPv4 octets 2 and 3 (a.XXX.XXX.d).
+      -MaskD                     Mask destination IPv4 octets 2 and 3.
+      -ShortIPv6                 Abbreviate IPv6 endpoints to their first and
+                                 last two groups (display only).
+      -RedactStrings <string[]>  Omit table rows containing any of these strings
+                                 (literal, case-insensitive).
+      -?                         Show this help.
+
+    Examples:
+      .\stop-sch.ps1
+      .\stop-sch.ps1 -FilterIp 192.168.1.52 -ShortIPv6
+      .\stop-sch.ps1 -MaskS -MaskD -RedactStrings svchost.exe, msedge.exe
+      powershell -ExecutionPolicy Bypass -File stop-sch.ps1 -FailuresOnly
 #>
 param(
     [string]$FilterIp = '',

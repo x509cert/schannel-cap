@@ -63,7 +63,13 @@ stop-sch.ps1 -RedactStrings 'OUTLOOK.EXE','20.94.35.60'
 # run the decoder by hand on any pcapng (text, or CSV)
 tls_group.exe tls.pcapng connections.txt
 tls_group.exe tls.pcapng connections.txt 192.168.1.52 -csv
+
+# list every stop-sch.ps1 option
+stop-sch.ps1 -?
 ```
+
+`-?` needs the same elevated window as the script. In a non-elevated window,
+use `Get-Help .\stop-sch.ps1` instead.
 
 Must run from an **elevated PowerShell window** (Run as administrator). Both
 scripts stop with an error if not elevated; they do not prompt or self-elevate.

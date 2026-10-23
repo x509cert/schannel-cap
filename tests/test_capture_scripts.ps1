@@ -239,4 +239,14 @@ if ($PSStyle) {
     Assert-True ($script:state.Colors -contains 'DarkYellow=TLS_AES_128_GCM_SHA256') '128-bit TLS 1.3 ciphers must use the closest console color to orange.'
 }
 
+# Without valid comment-based help, -? runs the script instead of showing help.
+$stopAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $script:repo 'stop-sch.ps1'), [ref]$null, [ref]$null)
+$stopHelp = $stopAst.GetHelpContent()
+Assert-True ($stopHelp -and $stopHelp.Synopsis) 'stop-sch.ps1 needs comment-based help so -? shows help instead of running.'
+foreach ($parameter in $stopAst.ParamBlock.Parameters) {
+    $name = $parameter.Name.VariablePath.UserPath
+    Assert-True ($stopHelp.Description -match "(?m)^\s*-$name\b") "stop-sch.ps1 -? help must list -$name."
+}
+
 [Console]::WriteLine("PASS: $script:checks capture-script assertions (mocked; no live capture or process changes).")
