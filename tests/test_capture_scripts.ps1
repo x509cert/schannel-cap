@@ -41,7 +41,14 @@ function Write-Host {
         [object]$ForegroundColor,
         [switch]$NoNewline
     )
-    process { $script:state.Output.Add([string]$Object) }
+    process {
+        if ($ForegroundColor) { $script:state.Colors.Add("$ForegroundColor=$Object") }
+        $script:state.Line += [string]$Object
+        if (-not $NoNewline) {
+            $script:state.Output.Add($script:state.Line)
+            $script:state.Line = ''
+        }
+    }
 }
 function Write-Warning { param([string]$Message) $script:state.Warnings.Add($Message) }
 
@@ -65,17 +72,20 @@ function Invoke-TestDecoder {
     $script:state.Calls.Add('decoder')
     $global:LASTEXITCODE = $script:state.DecodeExit
     'Time,PID,Process,Side,Source,Dest,Version,Cipher,Group,Class'
-    '12:00:00.000,42,success-process,srv,192.0.2.2:50000,192.0.2.1:443,TLS1.3,TLS_AES_256_GCM_SHA384,SecP384r1MLKEM1024,hybrid'
+    "12:00:00.000,42,success-process,srv,$($script:state.Source),$($script:state.Dest),TLS1.3,$($script:state.Cipher),SecP384r1MLKEM1024,hybrid"
 }
 
 function Invoke-Scenario([string]$Name, [hashtable]$Overrides = @{}, [hashtable]$Arguments = @{}) {
     $script:state = @{
         Calls = [System.Collections.Generic.List[string]]::new()
         Output = [System.Collections.Generic.List[string]]::new()
+        Colors = [System.Collections.Generic.List[string]]::new()
+        Line = ''
         Warnings = [System.Collections.Generic.List[string]]::new()
         RemoveExit = 0; AddExit = 0; StartExit = 0; FallbackStartExit = 0; StartCount = 0
         ConvertExit = 0; FallbackConvertExit = 0; DecodeExit = 0
         PcapExists = $false; CreatePcap = $true; FailuresExist = $true; DecoderExists = $true
+        Source = '192.0.2.2:50000'; Dest = '192.0.2.1:443'; Cipher = 'TLS_AES_256_GCM_SHA384'
         Exception = $null
     }
     foreach ($key in $Overrides.Keys) { $script:state[$key] = $Overrides[$key] }
@@ -162,5 +172,71 @@ Invoke-Scenario 'stop' @{} @{ RedactStrings = @('success-process') }
 Assert-True ($null -eq $script:state.Exception) 'Output redaction must remain supported.'
 Assert-True (@($script:state.Output -like '*success-process*').Count -eq 0) 'Redaction must remove successful rows.'
 Assert-True (@($script:state.Output -like '*failure-process*').Count -gt 0) 'Redaction must retain unmatched failures.'
+
+$longIPv6 = '2001:0db8:1234:5678:9abc:def0:abcd:ef01'
+$shortIPv6 = '[2001:db8:...:abcd:ef01]'
+Invoke-Scenario 'stop' @{ Source = "${longIPv6}:50000"; Dest = "[${longIPv6}]:443" }
+Assert-True ($null -eq $script:state.Exception) 'IPv6 output without shortening must succeed.'
+Assert-True (($script:state.Output -join "`n").Contains("${longIPv6}:50000")) 'IPv6 endpoints must remain unchanged by default.'
+Assert-True (($script:state.Output -join "`n").Contains("[${longIPv6}]:443")) 'Bracketed IPv6 endpoints must remain unchanged by default.'
+
+foreach ($case in @(
+    @{ Source = "${longIPv6}:50000"; Dest = "[${longIPv6}]:443";
+       ExpectedSource = "${shortIPv6}:50000"; ExpectedDest = "${shortIPv6}:443" },
+    @{ Source = '[2001:db8:1234:5678::abcd:ef01]:50000'; Dest = 'fe80:0000:0000:0000:1234:5678:abcd:ef01%12:443';
+       ExpectedSource = "${shortIPv6}:50000"; ExpectedDest = '[fe80:0:...:abcd:ef01%12]:443' },
+    @{ Source = '[::1]:50000'; Dest = '[2001:db8::1]:443';
+       ExpectedSource = '[::1]:50000'; ExpectedDest = '[2001:db8::1]:443' },
+    @{ Source = '192.0.2.2:50000'; Dest = 'resolved.example:443';
+       ExpectedSource = '192.0.2.2:50000'; ExpectedDest = 'resolved.example:443' }
+)) {
+    Invoke-Scenario 'stop' @{ Source = $case.Source; Dest = $case.Dest } @{ ShortIPv6 = $true }
+    Assert-True ($null -eq $script:state.Exception) 'IPv6 shortening must succeed.'
+    $output = $script:state.Output -join "`n"
+    Assert-True ($output.Contains($case.ExpectedSource)) "Unexpected shortened source: $($case.Source)"
+    Assert-True ($output.Contains($case.ExpectedDest)) "Unexpected shortened destination: $($case.Dest)"
+    Assert-True ($output.Contains('failure-process')) 'IPv6 shortening must retain failure rows with unknown endpoints.'
+}
+
+Invoke-Scenario 'stop' @{ Source = "${longIPv6}:50000" } @{ ShortIPv6 = $true; MaskD = $true }
+Assert-True ($null -eq $script:state.Exception) 'IPv6 shortening must work alongside IPv4 masking.'
+Assert-True (($script:state.Output -join "`n").Contains("${shortIPv6}:50000")) 'IPv6 shortening must remain effective alongside masking.'
+Assert-True (($script:state.Output -join "`n").Contains('192.XXX.XXX.1:443')) 'IPv4 masking must remain effective alongside shortening.'
+
+Invoke-Scenario 'stop' @{ Source = "${longIPv6}:50000" } @{
+    ShortIPv6 = $true; RedactStrings = @($shortIPv6)
+}
+Assert-True ($null -eq $script:state.Exception) 'Redaction of abbreviated IPv6 endpoints must succeed.'
+Assert-True (@($script:state.Output -like '*success-process*').Count -eq 0) 'Redaction must match the displayed IPv6 abbreviation literally.'
+Assert-True (@($script:state.Output -like '*failure-process*').Count -gt 0) 'IPv6 redaction must retain unmatched failures.'
+
+# Colors must render on both PowerShell 7.2+ (ANSI) and Windows PowerShell 5.1
+# (console colors), without shifting table columns.
+Invoke-Scenario 'stop'
+Assert-True ($null -eq $script:state.Exception) 'Colored table output must succeed.'
+$lines = (($script:state.Output -join "`n") -replace "$([char]27)\[[0-9;]*m", '') -split "\r?\n"
+$header = @($lines | Where-Object { $_ -match '^Time +Result ' })
+$successLine = @($lines | Where-Object { $_ -like '*success-process*' })
+Assert-True ($header.Count -eq 1 -and $successLine.Count -eq 1) 'Table must include one header and one success row.'
+Assert-True ($header[0].IndexOf('Group') -eq $successLine[0].IndexOf('SecP384r1MLKEM1024')) 'Cells must stay aligned with their headers.'
+Assert-True ($header[0] -match 'Group +Error\s*$' -and $header[0] -notmatch 'EventId|Level') 'Error must directly follow Group; EventId and Level must not be displayed.'
+Assert-True (($lines -join "`n").Contains('synthetic-failure')) 'Failure details must remain visible.'
+if ($PSStyle) {
+    $output = $script:state.Output -join "`n"
+    Assert-True ($output.Contains("$($PSStyle.Foreground.Green)SecP384r1MLKEM1024")) 'Hybrid groups must be green.'
+    Assert-True ($output.Contains("$($PSStyle.Foreground.Red)Failure")) 'Failure results must be red.'
+} else {
+    Assert-True ($script:state.Colors -contains 'Green=SecP384r1MLKEM1024') 'Hybrid groups must be green.'
+    Assert-True ($script:state.Colors -contains 'Red=Failure') 'Failure results must be red.'
+    Assert-True ($script:state.Colors.Count -eq 2) 'Only matching cells may be colored.'
+}
+
+Invoke-Scenario 'stop' @{ Cipher = 'TLS_AES_128_GCM_SHA256' }
+Assert-True ($null -eq $script:state.Exception) 'Colored 128-bit cipher output must succeed.'
+if ($PSStyle) {
+    Assert-True (($script:state.Output -join "`n").Contains("$($PSStyle.Foreground.FromRgb(255,165,0))TLS_AES_128_GCM_SHA256")) '128-bit TLS 1.3 ciphers must be orange.'
+} else {
+    Assert-True ($script:state.Colors -contains 'DarkYellow=TLS_AES_128_GCM_SHA256') '128-bit TLS 1.3 ciphers must use the closest console color to orange.'
+}
 
 [Console]::WriteLine("PASS: $script:checks capture-script assertions (mocked; no live capture or process changes).")

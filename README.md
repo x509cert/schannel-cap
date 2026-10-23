@@ -23,8 +23,18 @@ powershell -ExecutionPolicy Bypass -File start-sch.ps1 -Port 8443
 #    ... from ANOTHER host:  curl --http1.1 -k https://<server-ip>:8443/
 
 # 3. stop + colored table
-powershell -ExecutionPolicy Bypass -File stop-sch.ps1    
+pwsh -ExecutionPolicy Bypass -File stop-sch.ps1
 ```
+
+Colored table output works in both Windows PowerShell 5.1 (`powershell`) and
+PowerShell 7.2+ (`pwsh`). PowerShell 7.2+ shows true orange (5.1 uses dark
+yellow) and resolves `-Resolve` names in parallel.
+
+To make PowerShell 7 the default in **Windows Terminal**, open **Settings**
+(`Ctrl+,`) → **Startup** → **Default profile**, select **PowerShell** (the
+PowerShell 7 profile, not **Windows PowerShell**), and save. Open a new elevated
+tab, then run `.\stop-sch.ps1` directly. This setting does not change explicit
+`powershell` commands; use `pwsh` instead when naming the executable.
 
 Common variations:
 
@@ -40,6 +50,9 @@ stop-sch.ps1 -FilterIp 192.168.1.52
 
 # mask the second and third octets of source and destination IPv4 addresses
 stop-sch.ps1 -MaskS -MaskD
+
+# shorten long IPv6 addresses in both endpoint columns (keep ports)
+stop-sch.ps1 -ShortIPv6
 
 # show only failed Schannel operations
 stop-sch.ps1 -FailuresOnly
@@ -89,6 +102,8 @@ captured on this machine class — drive the handshake from another host (see
   PowerShell with **Run as administrator** before running the `.ps1` scripts.
 - **PowerShell** to run the scripts. On a fresh box, launch with
   `-ExecutionPolicy Bypass` (see below) or `Unblock-File *.ps1` once.
+  Windows PowerShell 5.1 (`powershell`) and PowerShell 7.2+ (`pwsh`) both
+  display colored tables.
 
 No Wireshark/Npcap required. (If Npcap is installed it does not interfere with
 this pktmon-based flow, but note the loopback caveat below.)
@@ -145,8 +160,8 @@ powershell -ExecutionPolicy Bypass -File start-sch.ps1
 #    (see "Same-machine limitation" -- drive it from ANOTHER host)
 curl --http1.1 -k https://<server-ip>:8443/       # from another machine
 
-# 3. stop + decode
-powershell -ExecutionPolicy Bypass -File stop-sch.ps1
+# 3. stop + decode with colored output
+pwsh -ExecutionPolicy Bypass -File stop-sch.ps1
 ```
 
 Optional filters:
@@ -156,7 +171,7 @@ Optional filters:
 powershell -ExecutionPolicy Bypass -File start-sch.ps1 -FilterPid 100104
 
 # only show handshakes involving one IP (matches either endpoint)
-powershell -ExecutionPolicy Bypass -File stop-sch.ps1 -FilterIp 192.168.1.52
+pwsh -ExecutionPolicy Bypass -File stop-sch.ps1 -FilterIp 192.168.1.52
 ```
 
 **Shrink the capture (recommended).** By default everything is captured, which
@@ -203,11 +218,11 @@ Example output from `stop-sch.ps1`:
 
 `stop-sch.ps1` renders the result as a PowerShell table, one row per connection
 (duplicate captures from multi-point capture are collapsed), with **per-cell
-color** via `$PSStyle`:
+color**:
 
 - Successful ServerHello rows have `Result=Success`. Schannel events at warning,
   error, or critical level have `Result=Failure`, a red Result cell, and include
-  their ETW `EventId`, `Level`, and decoded properties in `Error`.
+  their decoded ETW event properties in `Error`.
 - Pass `-FailuresOnly` to display only failure rows:
 
   ```powershell
@@ -221,19 +236,31 @@ color** via `$PSStyle`:
   addresses by replacing the second and third octets with `XXX` (for example,
   `192.168.1.52:59618` becomes `192.XXX.XXX.52:59618`). IPv6 addresses and names
   produced by `-Resolve` are left unchanged.
+- `-ShortIPv6` abbreviates long IPv6 addresses in both endpoint columns to
+  their first two and last two hexadecimal groups, preserving ports and scope
+  IDs. For example, `2001:0db8:1234:5678:9abc:def0:abcd:ef01:443` becomes
+  `[2001:db8:...:abcd:ef01]:443`. Already-short addresses, IPv4 addresses, and
+  resolved names are unchanged. This is a display abbreviation, not a unique
+  identifier or a valid IPv6 literal; different addresses can look identical.
+  Full addresses remain in the capture and connection files. It can be combined
+  with `-MaskS`, `-MaskD`, and `-Resolve`.
 - `-RedactStrings` omits any table row containing one or more supplied strings.
   Matching is literal and case-insensitive and applies to the displayed values,
-  including masked endpoints and reverse-DNS names produced by `-Resolve`.
+  including masked or shortened endpoints and reverse-DNS names produced by
+  `-Resolve`.
 - The **Version** cell turns **red** on **TLS 1.2** (a migration/compliance flag).
 - The **Group** cell turns **green** for a **TLS 1.3 PQC hybrid** (or pure-PQC)
   group; otherwise default.
 - The **Cipher** cell turns **orange** for a **TLS 1.3** suite at the 128-bit
   tier (`AES_128` / `SHA256`) — i.e. weaker than `AES_256_GCM_SHA384`.
 
-Per-cell color needs **PowerShell 7.2+** (where `Format-Table` is ANSI-aware).
-On Windows PowerShell 5.1 it falls back to a plain, uncolored table. The table
-uses `-Wrap`, so the Group column is never truncated (it wraps on a narrow
-console rather than showing `…`). `Source` is the client, `Dest` is the server
+PowerShell 7.2+ colors cells with `$PSStyle` ANSI codes inside an ANSI-aware
+`Format-Table`, which uses `-Wrap`, so the Group column is never truncated (it
+wraps on a narrow console rather than showing `…`). Windows PowerShell 5.1 has
+no `$PSStyle` and its `Format-Table` counts ANSI codes toward column widths, so
+the script writes its own aligned table there using console colors; orange is
+shown as dark yellow, the closest console color. Columns are never truncated.
+`Source` is the client, `Dest` is the server
 (connection direction). The Group shows the group **name**; the raw `0xXXXX`
 codepoint is shown only when the group isn't recognized. **Process** is the
 owning process image name (e.g. `KestrelTls13.exe`), resolved live during

@@ -1,7 +1,7 @@
 #Requires -RunAsAdministrator
 
 <#
-  stop-sch.ps1 [-FilterIp <ip>] [-FailuresOnly] [-MaskS] [-MaskD]
+  stop-sch.ps1 [-FilterIp <ip>] [-FailuresOnly] [-MaskS] [-MaskD] [-ShortIPv6]
     [-RedactStrings <string[]>]
     -- end capture and decode the negotiated group
     * stops pktmon and the ETW listener
@@ -9,6 +9,7 @@
     * optional -FilterIp: only show handshakes involving that IP (either end)
     * optional -FailuresOnly: show only Schannel warning/error/critical events
     * optional -MaskS/-MaskD: mask source/destination IPv4 octets 2 and 3
+    * optional -ShortIPv6: abbreviate IPv6 endpoints to first/last two groups
     * optional -RedactStrings: omit table rows containing any supplied string
   Run from an elevated PowerShell window:
     powershell -ExecutionPolicy Bypass -File stop-sch.ps1
@@ -19,7 +20,8 @@ param(
     [switch]$Resolve,           # replace IPs with reverse-DNS names (slow; cached)
     [switch]$MaskS,
     [switch]$MaskD,
-    [string[]]$RedactStrings = @()
+    [string[]]$RedactStrings = @(),
+    [switch]$ShortIPv6
 )
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -83,7 +85,6 @@ if ($captureReady -and -not (Test-Path -LiteralPath $decode -PathType Leaf)) {
         ForEach-Object { $_.Group[0] } |
         ForEach-Object {
             $_ | Select-Object *, @{ N='Result'; E={ 'Success' } },
-                @{ N='EventId'; E={ '' } }, @{ N='Level'; E={ '' } },
                 @{ N='Error'; E={ '' } }
         })
 }
@@ -104,7 +105,6 @@ if (Test-Path $failures) {
             Class   = ''
             Result  = 'Failure'
             EventId = $_.EventId
-            Level   = $_.Level
             Error   = $_.Error
         }
     } | Group-Object Time, PID, EventId, Error | ForEach-Object { $_.Group[0] })
@@ -203,17 +203,44 @@ if (-not $rows) {
         }
     }
 
+    if ($ShortIPv6) {
+        function Shorten-IPv6Endpoint([string]$endpoint) {
+            if ($endpoint -match '^\[(.+)\](:\d+)$' -or
+                $endpoint -match '^(.+)(:\d+)$') {
+                $address = $Matches[1]
+                $port = $Matches[2]
+                $ip = $null
+                if ([System.Net.IPAddress]::TryParse($address, [ref]$ip) -and
+                    $ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+                    $bytes = $ip.GetAddressBytes()
+                    $groups = @(for ($i = 0; $i -lt 16; $i += 2) {
+                        '{0:x}' -f ([int]$bytes[$i] * 256 + $bytes[$i + 1])
+                    })
+                    $short = '{0}:{1}:...:{2}:{3}' -f $groups[0], $groups[1], $groups[6], $groups[7]
+                    if ($address -match '%[^%]+$') { $short += $Matches[0] }
+                    if ($short.Length -lt $address.Length) { return "[$short]$port" }
+                }
+            }
+            return $endpoint
+        }
+
+        foreach ($r in $rows) {
+            $r.Source = Shorten-IPv6Endpoint $r.Source
+            $r.Dest = Shorten-IPv6Endpoint $r.Dest
+        }
+    }
+
     # Redact complete table rows using the values that will actually be shown.
     # IndexOf provides literal matching, so redaction strings are not regexes.
     $redactTerms = @($RedactStrings | Where-Object {
         -not [string]::IsNullOrEmpty($_)
     })
+    $tableColumns = @('Time', 'Result', 'PID', 'Process', 'Source', 'Dest',
+                      'Version', 'Cipher', 'Group', 'Error')
     if ($redactTerms.Count) {
-        $displayColumns = @('Time', 'Result', 'PID', 'Process', 'Source', 'Dest',
-                            'Version', 'Cipher', 'Group', 'EventId', 'Level', 'Error')
         $rows = @($rows | Where-Object {
             $row = $_
-            $line = ($displayColumns | ForEach-Object {
+            $line = ($tableColumns | ForEach-Object {
                 [string]$row.$_
             }) -join ' '
 
@@ -228,16 +255,36 @@ if (-not $rows) {
         })
     }
 
-    # Per-cell color inside a real Format-Table via $PSStyle ANSI (PS 7.2+):
-    #   TLS1.2 -> red;  hybrid / pqc group -> green.  Falls back to a plain
-    #   table on Windows PowerShell 5.1 (no $PSStyle).
+    # Per-cell colors: failure / TLS1.2 -> red; TLS 1.3 at the 128-bit tier
+    # (AES128 / SHA256) -> orange; hybrid / pqc group -> green.
+    function Get-CellColor($row, [string]$column) {
+        switch ($column) {
+            'Result'  { if ($row.Result -eq 'Failure') { return 'Red' } }
+            'Version' { if ($row.Version -eq 'TLS1.2') { return 'Red' } }
+            'Cipher'  {
+                if ($row.Version -eq 'TLS1.3' -and $row.Cipher -match 'AES_128|SHA256') {
+                    return 'Orange'
+                }
+            }
+            'Group'   { if ($row.Class -in 'hybrid', 'pqc') { return 'Green' } }
+        }
+        return $null
+    }
+
     if (-not $rows) {
         Write-Host '(no table rows remain after redaction)' -ForegroundColor Yellow
     } elseif ($PSStyle) {
-        $red    = $PSStyle.Foreground.Red
-        $green  = $PSStyle.Foreground.Green
-        $orange = $PSStyle.Foreground.FromRgb(255,165,0)
-        $reset  = $PSStyle.Reset
+        # PowerShell 7.2+: ANSI colors inside a real Format-Table.
+        $ansi = @{
+            Red    = $PSStyle.Foreground.Red
+            Green  = $PSStyle.Foreground.Green
+            Orange = $PSStyle.Foreground.FromRgb(255,165,0)
+        }
+        $reset = $PSStyle.Reset
+        function Format-AnsiCell($row, [string]$column) {
+            $color = Get-CellColor $row $column
+            if ($color) { "$($ansi[$color])$($row.$column)$reset" } else { $row.$column }
+        }
         # keep ANSI codes when the table is captured via Out-String (default
         # 'Host' rendering strips them); restore afterwards.
         $prevRender = $PSStyle.OutputRendering
@@ -245,28 +292,57 @@ if (-not $rows) {
         $tbl = $rows |
             Select-Object `
                 Time,
-                @{ N='Result'; E={
-                    if ($_.Result -eq 'Failure') { "$red$($_.Result)$reset" }
-                    else { $_.Result } }},
+                @{ N='Result'; E={ Format-AnsiCell $_ 'Result' } },
                 PID, Process, Source, Dest,
-                @{ N='Version'; E={
-                    if ($_.Version -eq 'TLS1.2') { "$red$($_.Version)$reset" } else { $_.Version } }},
-                @{ N='Cipher'; E={
-                    # TLS 1.3 at the 128-bit tier (AES128 / SHA256) -> orange
-                    if ($_.Version -eq 'TLS1.3' -and $_.Cipher -match 'AES_128|SHA256') {
-                        "$orange$($_.Cipher)$reset" } else { $_.Cipher } }},
-                @{ N='Group'; E={
-                    if ($_.Class -in 'hybrid','pqc') { "$green$($_.Group)$reset" }
-                    else { $_.Group } }},
-                EventId, Level, Error |
+                @{ N='Version'; E={ Format-AnsiCell $_ 'Version' } },
+                @{ N='Cipher'; E={ Format-AnsiCell $_ 'Cipher' } },
+                @{ N='Group'; E={ Format-AnsiCell $_ 'Group' } },
+                Error |
             Format-Table -AutoSize -Wrap | Out-String -Width 500
         $PSStyle.OutputRendering = $prevRender
         Write-Host $tbl
     } else {
-        $rows |
-            Format-Table Time, Result, PID, Process, Source, Dest, Version,
-                Cipher, Group, EventId, Level, Error -AutoSize -Wrap |
-            Out-String -Width 500 | Write-Host
+        # Windows PowerShell 5.1 has no $PSStyle, and its Format-Table counts
+        # ANSI escapes toward column widths, so write aligned cells with console
+        # colors instead. ConsoleColor has no orange; DarkYellow is closest.
+        $consoleColors = @{ Red = 'Red'; Green = 'Green'; Orange = 'DarkYellow' }
+        $widths = @{}
+        foreach ($column in $tableColumns) {
+            $width = $column.Length
+            foreach ($r in $rows) {
+                $length = ([string]$r.$column).Length
+                if ($length -gt $width) { $width = $length }
+            }
+            $widths[$column] = $width
+        }
+        $last = $tableColumns.Count - 1
+
+        Write-Host ''
+        Write-Host (($tableColumns | ForEach-Object {
+            $_.PadRight($widths[$_]) }) -join ' ').TrimEnd()
+        Write-Host (($tableColumns | ForEach-Object {
+            ('-' * $_.Length).PadRight($widths[$_]) }) -join ' ').TrimEnd()
+        foreach ($r in $rows) {
+            $lastValue = $last
+            while ($lastValue -gt 0 -and -not [string]$r.($tableColumns[$lastValue])) {
+                $lastValue--
+            }
+            for ($i = 0; $i -le $lastValue; $i++) {
+                $column = $tableColumns[$i]
+                $value = [string]$r.$column
+                $color = Get-CellColor $r $column
+                if ($color) {
+                    Write-Host $value -NoNewline -ForegroundColor $consoleColors[$color]
+                } else {
+                    Write-Host $value -NoNewline
+                }
+                if ($i -lt $lastValue) {
+                    Write-Host (' ' * ($widths[$column] - $value.Length + 1)) -NoNewline
+                }
+            }
+            Write-Host ''
+        }
+        Write-Host ''
     }
 
     # explain any unresolved PID/Process entries
@@ -281,7 +357,7 @@ if (-not $rows) {
     if ($failureRows) {
         Write-Host ''
         Write-Host "Note: failure endpoints are '?' because Schannel failure events do not reliably"
-        Write-Host '      include the connection tuple. EventId and Error retain the ETW diagnostics.'
+        Write-Host '      include the connection tuple. Error retains the decoded ETW event properties.'
     }
 }
 
